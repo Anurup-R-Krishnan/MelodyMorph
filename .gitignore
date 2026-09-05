@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+data/*.jsonl
+checkpoints/*.pt
+!checkpoints/best.pt
+runs/smoke/
+out/
+.pytest_cache/
+.claude/scheduled_tasks.lock

@@ -1,0 +1,24 @@
+# Tiny config for fast iteration and tests: small model, small corpus subset,
+# few epochs. Should finish in well under a minute even on CPU.
+data_cache: data/melodies_smoke.jsonl
+corpus_limit: 200
+val_fraction: 0.1
+transpose_range: 0
+block_size: 64
+stride: 32
+
+n_layer: 2
+n_head: 2
+d_model: 64
+dropout: 0.1
+
+batch_size: 16
+epochs: 2
+lr: 0.001
+weight_decay: 0.01
+warmup_frac: 0.1
+grad_clip: 1.0
+
+seed: 1337
+checkpoint_path: checkpoints/smoke.pt
+run_dir: runs/smoke
