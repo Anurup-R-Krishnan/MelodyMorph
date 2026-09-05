@@ -1,12 +1,13 @@
 """MelodyMorph MM-01 — compact studio console.
 
-No hero, no italics, no oversized type. Dense instrument layout:
-source rail / viewer / control deck + ledger-style candidates.
+Dense instrument layout, no hero type, no italics:
+source rail / viewer / control deck + ledger-style takes with contour strips.
 """
 
 from __future__ import annotations
 
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -36,6 +37,11 @@ st.set_page_config(
 )
 
 CHECKPOINT_PATH = os.environ.get("MELODYMORPH_CHECKPOINT", "checkpoints/best.pt")
+_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+def pitch_name(p: int) -> str:
+    return f"{_NAMES[p % 12]}{p // 12 - 1}"
 
 
 @st.cache_resource
@@ -44,6 +50,12 @@ def get_model(checkpoint_path: str):
 
 
 def dark_roll(melody, seed_len=0):
+    """Dark re-skin of viz.plot_piano_roll.
+
+    Recolouring is driven by note onset vs seed_len (patches are added in
+    melody order), never by sniffing the light-theme palette — so a viz.py
+    palette change can't silently break the seed/generated split.
+    """
     fig = plot_piano_roll(melody, seed_len=seed_len, title="")
     fig.set_size_inches(10, 2.9)
     fig.patch.set_facecolor("#0C0C0E")
@@ -55,16 +67,18 @@ def dark_roll(melody, seed_len=0):
     ax.xaxis.label.set_color("#85858C")
     ax.xaxis.label.set_fontsize(8)
     for line in ax.get_lines():
-        line.set_color("rgba(255,255,255,0.13)")
-        line.set_alpha(0.6)
-    for patch in list(ax.patches):
-        fc = patch.get_facecolor()
-        is_seed = fc[0] < 0.5
-        if is_seed:
-            patch.set_facecolor("#D8C79A")  # dry amber for seed
+        if line.get_linestyle() == "--":
+            line.set_color("#D8C79A")  # seed divider
+            line.set_alpha(0.9)
+        else:
+            line.set_color("rgba(255,255,255,0.13)")
+            line.set_alpha(0.6)
+    for patch, note in zip(ax.patches, melody):
+        if note.onset < seed_len:
+            patch.set_facecolor("#D8C79A")  # dry amber = seed
             patch.set_edgecolor("#2A2415")
         else:
-            patch.set_facecolor("#7EE8B8")  # single mint accent for generated
+            patch.set_facecolor("#7EE8B8")  # mint = generated
             patch.set_edgecolor("#0B2E22")
         patch.set_linewidth(0.6)
         patch.set_alpha(0.95)
@@ -72,11 +86,33 @@ def dark_roll(melody, seed_len=0):
     return fig
 
 
+def contour_strip(melody, seed_len=0):
+    """Tiny pitch-contour strip: the motif's shape at a glance."""
+    notes = sorted(melody, key=lambda n: n.onset)
+    fig, ax = plt.subplots(figsize=(3.4, 1.15))
+    fig.patch.set_facecolor("#0C0C0E")
+    ax.set_facecolor("#0C0C0E")
+    if notes:
+        xs = [n.onset for n in notes]
+        ys = [n.pitch for n in notes]
+        if seed_len:
+            ax.axvspan(0, seed_len, color="#D8C79A", alpha=0.08)
+        ax.step(xs, ys, where="post", color="#7EE8B8", linewidth=1.3)
+        ax.plot(xs, ys, "o", color="#7EE8B8", markersize=2.5)
+        ax.set_xlim(0, max(xs) + 4)
+    for spine in ax.spines.values():
+        spine.set_color("rgba(255,255,255,0.10)")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    fig.tight_layout(pad=0.4)
+    return fig
+
+
 THEME_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=Plus+Jakarta+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 
 /* kill italics everywhere — hard rule */
-em, i, .hero-h1 em { font-style: normal !important; font-family: inherit !important; }
+em, i { font-style: normal !important; font-family: inherit !important; }
 
 .stApp { background: #080808; color: #E8E8EA; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
 .stApp::before {
@@ -98,20 +134,20 @@ header[data-testid="stHeader"] { background: transparent; }
 /* slim transport bar — fixed, only blurred fixed element */
 .transport {
   position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 30;
-  display: flex; align-items: center; gap: 16px;
-  height: 46px; padding: 0 8px 0 14px; max-width: min(1320px, calc(100% - 2rem)); width: max-content;
+  display: flex; align-items: center; gap: 14px;
+  height: 46px; padding: 0 8px 0 14px; max-width: calc(100% - 1rem); width: max-content;
   background: rgba(14,14,16,0.82); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
   border: 1px solid rgba(255,255,255,0.09); border-radius: 12px;
   box-shadow: 0 18px 44px -18px rgba(0,0,0,0.9), inset 0 1px 0 rgba(255,255,255,0.08);
 }
-.transport .mk { font-family: 'JetBrains Mono'; font-size: 11px; font-weight: 500; letter-spacing: 0.08em; color: #fff; display:flex; align-items:center; gap:8px; }
-.transport .mk .led { width: 7px; height: 7px; border-radius: 50%; background: #7EE8B8; box-shadow: 0 0 10px #7EE8B8; }
-.transport .sep { width: 1px; height: 22px; background: rgba(255,255,255,0.10); }
+.transport .mk { font-family: 'JetBrains Mono'; font-size: 11px; font-weight: 500; letter-spacing: 0.08em; color: #fff; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.transport .mk .led { width: 7px; height: 7px; border-radius: 50%; background: #7EE8B8; box-shadow: 0 0 10px #7EE8B8; flex: none; }
+.transport .sep { width: 1px; height: 22px; background: rgba(255,255,255,0.10); flex: none; }
 .transport .tlink { font-family: 'JetBrains Mono'; font-size: 11px; color: #9A9AA1; text-decoration: none; padding: 7px 10px; border-radius: 8px; transition: all 500ms cubic-bezier(0.32,0.72,0,1); }
 .transport .tlink:hover { color: #fff; background: rgba(255,255,255,0.07); }
-.transport .rec { font-family: 'JetBrains Mono'; font-size: 11px; font-weight: 500; color: #080808; background: #7EE8B8; border-radius: 8px; padding: 8px 14px; text-decoration: none; transition: all 500ms cubic-bezier(0.32,0.72,0,1); }
+.transport .rec { font-family: 'JetBrains Mono'; font-size: 11px; font-weight: 500; color: #080808; background: #7EE8B8; border-radius: 8px; padding: 8px 14px; text-decoration: none; white-space: nowrap; transition: all 500ms cubic-bezier(0.32,0.72,0,1); }
 .transport .rec:hover { transform: translateY(-1px); background: #A5F0CC; }
-.burger { display: none; width: 32px; height: 32px; border-radius: 8px; background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.10); position: relative; cursor: pointer; }
+.burger { display: none; width: 32px; height: 32px; border-radius: 8px; background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.10); position: relative; cursor: pointer; flex: none; }
 .burger span { position: absolute; left: 8px; width: 16px; height: 1.5px; background: #fff; transition: all 500ms cubic-bezier(0.32,0.72,0,1); }
 .burger span:nth-child(1){ top: 11px; } .burger span:nth-child(2){ top: 16px; } .burger span:nth-child(3){ top: 21px; }
 .burger.open span:nth-child(1){ top: 16px; transform: rotate(45deg); }
@@ -154,10 +190,12 @@ div[data-testid="stRadio"] label[data-baseweb="radio"]:hover { background: rgba(
 [data-testid="stTextArea"] textarea { font-family: 'JetBrains Mono' !important; font-size: 12px !important; line-height: 1.6 !important; }
 code { background: rgba(255,255,255,0.05) !important; color: #D8C79A !important; border: 1px solid rgba(255,255,255,0.09); border-radius: 6px; font-size: 11px; font-family: 'JetBrains Mono' !important; }
 
-/* generate key — rectangular hardware key, not a pill */
+/* hardware keys */
 div[data-testid="stButton"] > button[kind="primary"] { background: #E8E8EA !important; color: #080808 !important; border: none !important; border-bottom: 3px solid #7EE8B8 !important; border-radius: 10px !important; padding: 12px !important; font-family: 'JetBrains Mono' !important; font-weight: 500 !important; font-size: 12px !important; letter-spacing: 0.1em !important; width: 100%; transition: all 450ms cubic-bezier(0.32,0.72,0,1) !important; }
 div[data-testid="stButton"] > button[kind="primary"]:hover { transform: translateY(-1px) !important; background: #fff !important; }
 div[data-testid="stButton"] > button[kind="primary"]:active { transform: translateY(1px) scale(0.99) !important; border-bottom-width: 1px !important; }
+div[data-testid="stButton"] > button[kind="secondary"] { background: transparent !important; color: #85858C !important; border: 1px dashed rgba(255,255,255,0.18) !important; border-radius: 10px !important; padding: 9px !important; font-family: 'JetBrains Mono' !important; font-size: 11px !important; letter-spacing: 0.1em !important; width: 100%; transition: all 450ms cubic-bezier(0.32,0.72,0,1) !important; }
+div[data-testid="stButton"] > button[kind="secondary"]:hover { color: #fff !important; border-color: rgba(255,255,255,0.4) !important; }
 div[data-testid="stDownloadButton"] > button { background: transparent !important; color: #E8E8EA !important; border: 1px solid rgba(255,255,255,0.14) !important; border-radius: 8px !important; padding: 8px 12px !important; font-family: 'JetBrains Mono' !important; font-size: 11px !important; width: 100%; transition: all 450ms cubic-bezier(0.32,0.72,0,1) !important; }
 div[data-testid="stDownloadButton"] > button:hover { border-color: #7EE8B8 !important; color: #7EE8B8 !important; }
 audio { width: 100%; height: 32px; }
@@ -165,20 +203,24 @@ audio { width: 100%; height: 32px; }
 .stAlert { background: rgba(255,255,255,0.04) !important; border: 1px solid rgba(255,255,255,0.09) !important; border-radius: 10px !important; }
 
 /* ledger rows */
-.ledger-head { display: flex; align-items: center; gap: 10px; font-family: 'JetBrains Mono'; font-size: 11px; margin: 2px 0 10px; }
+.ledger-head { display: flex; align-items: center; gap: 10px; font-family: 'JetBrains Mono'; font-size: 11px; margin: 2px 0 10px; flex-wrap: wrap; }
 .ledger-head .idx { background: #E8E8EA; color: #080808; border-radius: 6px; padding: 2px 8px; font-weight: 500; }
 .ledger-head .score { color: #7EE8B8; border: 1px solid rgba(126,232,184,0.3); background: rgba(126,232,184,0.07); border-radius: 6px; padding: 2px 8px; }
+.ledger-head .stale { color: #D8C79A; border: 1px solid rgba(216,199,154,0.35); background: rgba(216,199,154,0.08); border-radius: 6px; padding: 2px 8px; }
+.ledger-head .fresh { color: #7EE8B8; border: 1px solid rgba(126,232,184,0.3); border-radius: 6px; padding: 2px 8px; }
 .ledger-head .meta { color: #63636B; margin-left: auto; }
 .spec { width: 100%; border-collapse: collapse; font-family: 'JetBrains Mono'; font-size: 11px; }
 .spec td { padding: 9px 4px; border-top: 1px solid rgba(255,255,255,0.07); color: #9A9AA1; vertical-align: top; }
 .spec td:first-child { color: #E8E8EA; width: 148px; }
 .mono { font-family: 'JetBrains Mono'; font-size: 11px; color: #85858C; }
+.strip-lbl { font-family: 'JetBrains Mono'; font-size: 9px; letter-spacing: 0.14em; color: #63636B; margin: 0 0 6px; }
 
 /* subtle reveal — 16px only */
 .reveal { opacity: 0; transform: translateY(16px); transition: opacity 700ms cubic-bezier(0.32,0.72,0,1), transform 700ms cubic-bezier(0.32,0.72,0,1); will-change: transform; }
 .reveal.in { opacity: 1; transform: translateY(0); }
 
 @media (max-width: 900px) {
+  .transport { gap: 8px; }
   .transport .tlink, .transport .sep { display: none; }
   .burger { display: block; }
   .mast h1 { font-size: 19px; }
@@ -240,14 +282,15 @@ if not Path(CHECKPOINT_PATH).exists():
     st.stop()
 
 model, tokenizer = get_model(CHECKPOINT_PATH)
-device = next(model.parameters()).device.type
+device = str(next(model.parameters()).device)
 
 if "mm_candidates" not in st.session_state:
     st.session_state.mm_candidates = []
 if "mm_seed" not in st.session_state:
     st.session_state.mm_seed = None
+if "mm_sig" not in st.session_state:
+    st.session_state.mm_sig = None
 
-# compact masthead — 22px title, mono subline, hardware readout
 st.markdown(
     f"""
 <div class="mast" id="console">
@@ -266,7 +309,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# three-pane console: source rail / viewer / control deck
 col_src, col_view, col_ctl = st.columns([1, 1.7, 1], gap="medium")
 
 with col_ctl:
@@ -276,31 +318,45 @@ with col_ctl:
                         format_func=lambda m: "CONT — extend" if m == "continuation" else "VAR — re-imagine")
         bars = st.slider("Bars", 1, 8, 4)
         k = st.slider("Takes", 1, 8, 4)
-        temperature = st.slider("Temp", 0.5, 1.5, 0.95 if mode == "continuation" else 1.15, 0.05)
-        top_p = st.slider("Top-p", 0.5, 1.0, 0.95, 0.01)
-        tempo = st.slider("BPM", 60, 160, 100, 5)
+        # Per-mode key: Streamlit otherwise keeps the old mode's value and the
+        # variation default (1.15) would never apply after switching modes.
+        temperature = st.slider("Temp", 0.5, 1.5,
+                                0.95 if mode == "continuation" else 1.15, 0.05,
+                                key=f"temp_{mode}")
+        top_p = st.slider("Top-p", 0.5, 1.0, 0.95, 0.01, key="top_p")
+        tempo = st.slider("BPM", 60, 160, 100, 5, key="bpm")
         go = st.button("RUN  ●", type="primary", use_container_width=True)
+        shuffle = st.button("SHUFFLE SEED + DIALS", type="secondary", use_container_width=True)
         st.markdown(f"<div class='mono'>ckpt · {CHECKPOINT_PATH}</div>", unsafe_allow_html=True)
+
+if shuffle:
+    st.session_state["src_choice"] = "Preset"
+    st.session_state["preset_name"] = random.choice(list(PRESET_SEEDS))
+    st.session_state[f"temp_{mode}"] = round(random.uniform(0.8, 1.3) * 20) / 20
+    st.session_state["top_p"] = round(random.uniform(0.85, 1.0), 2)
+    st.rerun()
 
 with col_src:
     with st.container():
         st.markdown('<div class="mod-label amber">SRC // SEED INPUT</div>', unsafe_allow_html=True)
-        source = st.radio("Input", ["Preset", "Text", "MIDI"], horizontal=True)
+        source = st.radio("Input", ["Preset", "Text", "MIDI"], horizontal=True, key="src_choice")
         seed = None
         if source == "Preset":
-            name = st.selectbox("Motif", list(PRESET_SEEDS))
+            name = st.selectbox("Motif", list(PRESET_SEEDS), key="preset_name")
             st.code(PRESET_SEEDS[name])
             seed = parse_note_string(PRESET_SEEDS[name])
         elif source == "Text":
             text = st.text_area("Notation", value=PRESET_SEEDS["Ode to Joy (opening)"],
-                                help="w h q e s + '.' · #/b · R = rest")
+                                help="w h q e s + '.' · #/b · R = rest", key="seed_text")
             if text.strip():
                 try:
                     seed = parse_note_string(text)
                 except ValueError as exc:
                     st.error(str(exc))
+            else:
+                st.warning("Notation is empty — enter notes or pick a preset.")
         else:
-            upload = st.file_uploader("MIDI seed", type=["mid", "midi"])
+            upload = st.file_uploader("MIDI seed", type=["mid", "midi"], key="midi_upload")
             if upload is not None:
                 tmp_path = Path("out/_uploaded_seed.mid")
                 tmp_path.parent.mkdir(parents=True, exist_ok=True)
@@ -309,47 +365,58 @@ with col_src:
                     seed = read_midi(tmp_path)
                 except ValueError as exc:
                     st.error(str(exc))
-        if seed is not None:
-            st.session_state.mm_seed = seed
-            st.session_state.mm_tempo = tempo
-        else:
-            st.info("Select a seed input.")
+            else:
+                st.markdown("<div class='mono'>— awaiting file.</div>", unsafe_allow_html=True)
+        # No stale previews: an invalid input clears the monitor explicitly.
+        st.session_state.mm_seed = seed
+        if seed is None and st.session_state.mm_candidates:
+            pass  # takes stay visible; the ledger flags them stale (see below)
 
 with col_view:
     with st.container():
         st.markdown('<div class="mod-label">VIEW // SEED MONITOR</div>', unsafe_allow_html=True)
         seed = st.session_state.mm_seed
-        tempo = st.session_state.get("mm_tempo", 100)
         if seed is not None:
             fig = dark_roll(seed, seed_len=melody_duration(seed) + 1)
             st.pyplot(fig, use_container_width=True)
             plt.close(fig)
             st.audio(melody_to_wav_bytes(seed, tempo_bpm=tempo), format="audio/wav")
+            lo, hi = min(n.pitch for n in seed), max(n.pitch for n in seed)
             st.markdown(
                 f"<div class='mono'>amber = seed · {len(seed)} notes · "
-                f"{melody_duration(seed)} steps · <br>{melody_to_note_string(seed)}</div>",
+                f"{melody_duration(seed)} steps · range {pitch_name(lo)}–{pitch_name(hi)}"
+                f"<br>{melody_to_note_string(seed)}</div>",
                 unsafe_allow_html=True,
             )
         else:
             st.markdown("<div class='mono'>— no signal. Load a seed in SRC.</div>", unsafe_allow_html=True)
 
 seed = st.session_state.mm_seed
-tempo = st.session_state.get("mm_tempo", 100)
+sig = (melody_to_note_string(seed), mode, bars, k,
+       round(float(temperature), 3), round(float(top_p), 3)) if seed is not None else None
 
-if go and seed is not None:
-    with st.spinner("Sampling takes…"):
-        fn = generate_continuations if mode == "continuation" else generate_variations
-        st.session_state.mm_candidates = fn(
-            model, tokenizer, seed, n_bars=bars, k=k,
-            temperature=temperature, top_p=top_p, device=device)
-        st.session_state.mm_mode = mode
-        st.session_state.mm_tempo = tempo
+if go:
+    if seed is None:
+        st.warning("Nothing to run — load a valid seed in SRC first.")
+    else:
+        try:
+            with st.spinner("Sampling takes…"):
+                fn = generate_continuations if mode == "continuation" else generate_variations
+                st.session_state.mm_candidates = fn(
+                    model, tokenizer, seed, n_bars=bars, k=k,
+                    temperature=float(temperature), top_p=float(top_p), device=device)
+                st.session_state.mm_sig = sig
+        except Exception as exc:  # never blank-crash the console
+            st.error(f"Generation failed: {exc}")
 
 candidates = st.session_state.mm_candidates
+stale = bool(candidates) and sig != st.session_state.mm_sig
+state_badge = ("<span class='stale'>STALE — press RUN</span>" if stale
+               else "<span class='fresh'>FRESH</span>") if candidates else ""
 
 st.markdown(
     f"<div class='mast' id='ledger' style='margin-top:26px'>"
-    f"<div><h1>Tape ledger <span>— {len(candidates)} take{'s' if len(candidates) != 1 else ''}</span></h1>"
+    f"<div><h1>Tape ledger <span>— {len(candidates)} take{'s' if len(candidates) != 1 else ''} {state_badge}</span></h1>"
     f"<p>MINT = GENERATED · AMBER = SEED REFERENCE</p></div></div>",
     unsafe_allow_html=True,
 )
@@ -361,29 +428,34 @@ if not candidates:
 else:
     out_dir = Path("out")
     out_dir.mkdir(exist_ok=True)
-    mm_mode = st.session_state.get("mm_mode", "continuation")
-    mm_tempo = st.session_state.get("mm_tempo", 100)
+    mm_mode = "variation" if any(c.motif_score is not None for c in candidates) else "continuation"
     for i, cand in enumerate(candidates):
         with st.container():
             score = f"{cand.motif_score:.2f}" if cand.motif_score is not None else "—"
+            lo, hi = min(n.pitch for n in cand.melody), max(n.pitch for n in cand.melody)
             st.markdown(
                 f"<div class='ledger-head'><span class='idx'>TAKE {i + 1:02d}</span>"
                 f"<span class='score'>MOTIF {score}</span>"
-                f"<span class='meta'>{len(cand.melody)} notes · {melody_duration(cand.melody)} steps</span></div>",
+                f"<span class='meta'>{len(cand.melody)} notes · "
+                f"{melody_duration(cand.melody)} steps · {pitch_name(lo)}–{pitch_name(hi)}</span></div>",
                 unsafe_allow_html=True,
             )
             fig = dark_roll(cand.melody, seed_len=cand.seed_len_steps)
             st.pyplot(fig, use_container_width=True)
             plt.close(fig)
-            a_col, d_col = st.columns([2.2, 1])
+            a_col, s_col = st.columns([1.7, 1])
             with a_col:
-                st.audio(melody_to_wav_bytes(cand.melody, tempo_bpm=mm_tempo), format="audio/wav")
-            with d_col:
+                st.audio(melody_to_wav_bytes(cand.melody, tempo_bpm=tempo), format="audio/wav")
                 midi_path = out_dir / f"{mm_mode}_{i + 1}.mid"
-                write_midi(cand.melody, midi_path, tempo_bpm=mm_tempo)
+                write_midi(cand.melody, midi_path, tempo_bpm=tempo)
                 st.download_button("SAVE .MID", data=midi_path.read_bytes(),
                                    file_name=midi_path.name, mime="audio/midi",
                                    key=f"dl_{i}", use_container_width=True)
+            with s_col:
+                st.markdown("<div class='strip-lbl'>CONTOUR</div>", unsafe_allow_html=True)
+                sfig = contour_strip(cand.melody, seed_len=cand.seed_len_steps)
+                st.pyplot(sfig, use_container_width=True)
+                plt.close(sfig)
 
 st.markdown(
     "<div class='mast' id='spec' style='margin-top:26px'>"
