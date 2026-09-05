@@ -83,12 +83,16 @@ def generate(
     temperature: float = 1.0,
     top_k: int = 0,
     top_p: float = 0.95,
-    device: str = "cpu",
+    device: str | None = None,
     stop_on_eos: bool = True,
     min_new_tokens: int = 12,
 ) -> list[int]:
     """Autoregressively extend ``prompt_ids`` under the REMI grammar mask."""
     model.eval()
+    # The sampling tensors must live on the model's own device. A stale
+    # "cpu" default used to crash CUDA-loaded checkpoints with a
+    # device-mismatch RuntimeError, so the model always wins.
+    device = str(next(model.parameters()).device)
     ids = list(prompt_ids)
 
     state = GrammarState(tokenizer)

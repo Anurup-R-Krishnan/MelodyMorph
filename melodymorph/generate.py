@@ -49,10 +49,11 @@ def generate_continuations(
     temperature: float = 0.95,
     top_k: int = 0,
     top_p: float = 0.95,
-    device: str = "cpu",
+    device: str | None = None,
     max_attempts: int | None = None,
 ) -> list[Candidate]:
     """Extend ``seed`` forward by ``n_bars`` bars, ``k`` distinct times."""
+    device = device or str(next(model.parameters()).device)
     seed_len = melody_duration(seed)
     prompt = tokenizer.encode(seed, add_special=True)[:-1]  # drop EOS, keep BOS
     target_steps = seed_len + n_bars * STEPS_PER_BAR
@@ -86,7 +87,7 @@ def generate_variations(
     temperature: float = 1.15,
     top_k: int = 0,
     top_p: float = 0.97,
-    device: str = "cpu",
+    device: str | None = None,
     similarity_band: tuple[float, float] = (0.35, 0.9),
     max_attempts: int = 24,
 ) -> list[Candidate]:
@@ -94,6 +95,7 @@ def generate_variations(
     keeping only candidates whose opening bar's interval contour is close-but-not-
     identical to the seed's -- the motif should be recognisable, not copy-pasted.
     """
+    device = device or str(next(model.parameters()).device)
     seed_len = melody_duration(seed)
     first_bar_seed = region_within(seed, 0, STEPS_PER_BAR)
     # prompt the model with only the very first note, so it must regenerate the
