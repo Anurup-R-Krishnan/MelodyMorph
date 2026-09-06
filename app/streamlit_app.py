@@ -31,7 +31,7 @@ from melodymorph.tokenizer import melody_duration
 from melodymorph.train import load_checkpoint
 from melodymorph.viz import plot_piano_roll
 
-st.set_page_config(page_title="MelodyMorph MM-01", page_icon="◍", layout="wide")
+st.set_page_config(page_title="MelodyMorph MM-01", page_icon="🎛", layout="wide")
 
 CHECKPOINT_PATH = os.environ.get("MELODYMORPH_CHECKPOINT", "checkpoints/best.pt")
 DEFAULT_PRESET = "Ode to Joy (opening)"
