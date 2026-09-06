@@ -1,7 +1,8 @@
-"""MelodyMorph MM-01 — compact studio console.
+"""MelodyMorph MM-01 — studio console (multipage).
 
-Dense instrument layout, no hero type, no italics:
-source rail / viewer / control deck + ledger-style takes with contour strips.
+Pages: Console (big seed monitor + input + dials) / Takes (big take graphs) /
+Spec (what the box does). Navigation is Streamlit-native so every nav item
+actually works. No italics, 22px max type.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 from melodymorph.audio import melody_to_wav_bytes
+from melodymorph.evaluate import log_human_rating
 from melodymorph.generate import generate_continuations, generate_variations
 from melodymorph.midi_io import (
     PRESET_SEEDS,
@@ -29,14 +31,10 @@ from melodymorph.tokenizer import melody_duration
 from melodymorph.train import load_checkpoint
 from melodymorph.viz import plot_piano_roll
 
-st.set_page_config(
-    page_title="MelodyMorph MM-01",
-    page_icon="◍",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+st.set_page_config(page_title="MelodyMorph MM-01", page_icon="◍", layout="wide")
 
 CHECKPOINT_PATH = os.environ.get("MELODYMORPH_CHECKPOINT", "checkpoints/best.pt")
+DEFAULT_PRESET = "Ode to Joy (opening)"
 _NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 
@@ -50,28 +48,27 @@ def get_model(checkpoint_path: str):
 
 
 def dark_roll(melody, seed_len=0):
-    """Dark re-skin of viz.plot_piano_roll.
+    """Dark re-skin of viz.plot_piano_roll, sized to fill the page width.
 
     Recolouring is driven by note onset vs seed_len (patches are added in
-    melody order), never by sniffing the light-theme palette — so a viz.py
-    palette change can't silently break the seed/generated split.
+    melody order), never by sniffing the light-theme palette.
     """
     fig = plot_piano_roll(melody, seed_len=seed_len, title="")
-    fig.set_size_inches(10, 2.9)
+    fig.set_size_inches(12.5, 4.4)
     fig.patch.set_facecolor("#0C0C0E")
     ax = fig.axes[0]
     ax.set_facecolor("#0C0C0E")
     for spine in ax.spines.values():
-        spine.set_color("rgba(255,255,255,0.10)")
-    ax.tick_params(colors="#85858C", labelsize=7)
+        spine.set_color((1, 1, 1, 0.10))
+    ax.tick_params(colors="#85858C", labelsize=8)
     ax.xaxis.label.set_color("#85858C")
-    ax.xaxis.label.set_fontsize(8)
+    ax.xaxis.label.set_fontsize(9)
     for line in ax.get_lines():
         if line.get_linestyle() == "--":
             line.set_color("#D8C79A")  # seed divider
             line.set_alpha(0.9)
         else:
-            line.set_color("rgba(255,255,255,0.13)")
+            line.set_color((1, 1, 1, 0.13))
             line.set_alpha(0.6)
     for patch, note in zip(ax.patches, melody):
         if note.onset < seed_len:
@@ -87,9 +84,9 @@ def dark_roll(melody, seed_len=0):
 
 
 def contour_strip(melody, seed_len=0):
-    """Tiny pitch-contour strip: the motif's shape at a glance."""
+    """Pitch-contour strip: the motif's shape at a glance."""
     notes = sorted(melody, key=lambda n: n.onset)
-    fig, ax = plt.subplots(figsize=(3.4, 1.15))
+    fig, ax = plt.subplots(figsize=(4.5, 1.6))
     fig.patch.set_facecolor("#0C0C0E")
     ax.set_facecolor("#0C0C0E")
     if notes:
@@ -97,11 +94,11 @@ def contour_strip(melody, seed_len=0):
         ys = [n.pitch for n in notes]
         if seed_len:
             ax.axvspan(0, seed_len, color="#D8C79A", alpha=0.08)
-        ax.step(xs, ys, where="post", color="#7EE8B8", linewidth=1.3)
-        ax.plot(xs, ys, "o", color="#7EE8B8", markersize=2.5)
+        ax.step(xs, ys, where="post", color="#7EE8B8", linewidth=1.4)
+        ax.plot(xs, ys, "o", color="#7EE8B8", markersize=3)
         ax.set_xlim(0, max(xs) + 4)
     for spine in ax.spines.values():
-        spine.set_color("rgba(255,255,255,0.10)")
+        spine.set_color((1, 1, 1, 0.10))
     ax.set_xticks([])
     ax.set_yticks([])
     fig.tight_layout(pad=0.4)
@@ -111,7 +108,6 @@ def contour_strip(melody, seed_len=0):
 THEME_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=Plus+Jakarta+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 
-/* kill italics everywhere — hard rule */
 em, i { font-style: normal !important; font-family: inherit !important; }
 
 .stApp { background: #080808; color: #E8E8EA; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
@@ -124,40 +120,27 @@ em, i { font-style: normal !important; font-family: inherit !important; }
   background-size: auto, 40px 40px, 40px 40px;
 }
 [data-testid="stAppViewContainer"] > .main { background: transparent; }
-.block-container { max-width: 1320px; padding-top: 5.2rem; padding-bottom: 3rem; }
+.block-container { max-width: 1320px; padding-top: 2rem; padding-bottom: 3rem; }
 .grain { position: fixed; inset: 0; z-index: 40; pointer-events: none; opacity: .04;
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"); }
 #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"] { visibility: hidden; height: 0; }
 [data-testid="stSidebar"] { display: none; }
 header[data-testid="stHeader"] { background: transparent; }
 
-/* slim transport bar — fixed, only blurred fixed element */
-.transport {
-  position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 30;
-  display: flex; align-items: center; gap: 14px;
-  height: 46px; padding: 0 8px 0 14px; max-width: calc(100% - 1rem); width: max-content;
-  background: rgba(14,14,16,0.82); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255,255,255,0.09); border-radius: 12px;
-  box-shadow: 0 18px 44px -18px rgba(0,0,0,0.9), inset 0 1px 0 rgba(255,255,255,0.08);
-}
-.transport .mk { font-family: 'JetBrains Mono'; font-size: 11px; font-weight: 500; letter-spacing: 0.08em; color: #fff; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-.transport .mk .led { width: 7px; height: 7px; border-radius: 50%; background: #7EE8B8; box-shadow: 0 0 10px #7EE8B8; flex: none; }
-.transport .sep { width: 1px; height: 22px; background: rgba(255,255,255,0.10); flex: none; }
-.transport .tlink { font-family: 'JetBrains Mono'; font-size: 11px; color: #9A9AA1; text-decoration: none; padding: 7px 10px; border-radius: 8px; transition: all 500ms cubic-bezier(0.32,0.72,0,1); }
-.transport .tlink:hover { color: #fff; background: rgba(255,255,255,0.07); }
-.transport .rec { font-family: 'JetBrains Mono'; font-size: 11px; font-weight: 500; color: #080808; background: #7EE8B8; border-radius: 8px; padding: 8px 14px; text-decoration: none; white-space: nowrap; transition: all 500ms cubic-bezier(0.32,0.72,0,1); }
-.transport .rec:hover { transform: translateY(-1px); background: #A5F0CC; }
-.burger { display: none; width: 32px; height: 32px; border-radius: 8px; background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.10); position: relative; cursor: pointer; flex: none; }
-.burger span { position: absolute; left: 8px; width: 16px; height: 1.5px; background: #fff; transition: all 500ms cubic-bezier(0.32,0.72,0,1); }
-.burger span:nth-child(1){ top: 11px; } .burger span:nth-child(2){ top: 16px; } .burger span:nth-child(3){ top: 21px; }
-.burger.open span:nth-child(1){ top: 16px; transform: rotate(45deg); }
-.burger.open span:nth-child(2){ opacity: 0; }
-.burger.open span:nth-child(3){ top: 16px; transform: rotate(-45deg); }
-.menu-overlay { position: fixed; inset: 0; z-index: 25; background: rgba(8,8,8,0.9); backdrop-filter: blur(24px); display: flex; flex-direction: column; align-items: flex-start; justify-content: center; padding: 0 8vw; gap: 4px; opacity: 0; pointer-events: none; transition: opacity 600ms cubic-bezier(0.32,0.72,0,1); }
-.menu-overlay.open { opacity: 1; pointer-events: auto; }
-.menu-overlay a { font-family: 'JetBrains Mono'; font-size: 15px; color: #fff; text-decoration: none; padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.08); width: 100%; opacity: 0; transform: translateY(16px); transition: all 600ms cubic-bezier(0.32,0.72,0,1); }
-.menu-overlay.open a { opacity: 1; transform: translateY(0); }
-.menu-overlay.open a:nth-child(2){ transition-delay: .07s; } .menu-overlay.open a:nth-child(3){ transition-delay: .14s; }
+/* top status strip */
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 16px; margin-bottom: 10px;
+  background: rgba(14,14,16,0.82); border: 1px solid rgba(255,255,255,0.09); border-radius: 12px;
+  box-shadow: 0 18px 44px -18px rgba(0,0,0,0.9), inset 0 1px 0 rgba(255,255,255,0.08); }
+.topbar .mk { font-family: 'JetBrains Mono'; font-size: 11px; font-weight: 500; letter-spacing: 0.08em; color: #fff; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.topbar .mk .led { width: 7px; height: 7px; border-radius: 50%; background: #7EE8B8; box-shadow: 0 0 10px #7EE8B8; flex: none; animation: blink 2.2s cubic-bezier(0.32,0.72,0,1) infinite; }
+.topbar .tstatus { font-family: 'JetBrains Mono'; font-size: 10px; letter-spacing: 0.1em; color: #7EE8B8; border: 1px solid rgba(126,232,184,0.3); background: rgba(126,232,184,0.07); border-radius: 8px; padding: 7px 11px; white-space: nowrap; }
+
+/* working page nav — real Streamlit page_links, themed as console tabs.
+   NOTE: the data-testid sits ON the anchor itself, not a wrapper. */
+a[data-testid="stPageLink-NavLink"] { font-family: 'JetBrains Mono' !important; font-size: 11px !important; letter-spacing: 0.08em !important; color: #9A9AA1 !important; text-decoration: none !important; border: 1px solid rgba(255,255,255,0.09) !important; border-radius: 9px !important; padding: 9px 6px !important; display: block !important; width: 100% !important; text-align: center !important; background: rgba(255,255,255,0.02) !important; transition: all 450ms cubic-bezier(0.32,0.72,0,1) !important; }
+a[data-testid="stPageLink-NavLink"]:hover { color: #fff !important; background: rgba(255,255,255,0.07) !important; }
+a[data-testid="stPageLink-NavLink"][aria-current="page"] { color: #080808 !important; background: #E8E8EA !important; border-color: #E8E8EA !important; font-weight: 500 !important; }
 
 /* console masthead — compact, 22px max */
 .mast { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; padding: 18px 4px 14px; border-bottom: 1px solid rgba(255,255,255,0.08); margin-bottom: 16px; flex-wrap: wrap; }
@@ -198,9 +181,20 @@ div[data-testid="stButton"] > button[kind="secondary"] { background: transparent
 div[data-testid="stButton"] > button[kind="secondary"]:hover { color: #fff !important; border-color: rgba(255,255,255,0.4) !important; }
 div[data-testid="stDownloadButton"] > button { background: transparent !important; color: #E8E8EA !important; border: 1px solid rgba(255,255,255,0.14) !important; border-radius: 8px !important; padding: 8px 12px !important; font-family: 'JetBrains Mono' !important; font-size: 11px !important; width: 100%; transition: all 450ms cubic-bezier(0.32,0.72,0,1) !important; }
 div[data-testid="stDownloadButton"] > button:hover { border-color: #7EE8B8 !important; color: #7EE8B8 !important; }
-audio { width: 100%; height: 32px; }
+audio { width: 100%; height: 32px; border-radius: 999px; background: #101013; }
+audio::-webkit-media-controls-panel { background: #101013 !important; }
+audio::-webkit-media-controls-current-time-display, audio::-webkit-media-controls-time-remaining-display { color: #E8E8EA !important; }
+audio::-webkit-media-controls-play-button, audio::-webkit-media-controls-mute-button { filter: invert(0.85); }
+[data-testid="stCodeBlock"] { background: #101013 !important; border: 1px solid rgba(255,255,255,0.09) !important; border-radius: 10px !important; }
+[data-testid="stCodeBlock"] pre { background: transparent !important; }
+[data-testid="stCodeBlock"] code { background: transparent !important; border: none !important; color: #D8C79A !important; }
+[data-testid="stCodeBlock"] button { color: #85858C !important; }
+/* hard font fallbacks: if the webfont fails, never fall to a default serif */
+.mast h1 { font-family: 'Space Grotesk', 'Plus Jakarta Sans', system-ui, sans-serif !important; }
+.mono, .mod-label, .ledger-head, .strip-lbl, .spec, .topbar .mk, .topbar .tstatus, code { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace !important; }
 [data-testid="stPyplot"] { background: #0C0C0E; border-radius: 10px; overflow: hidden; border: 1px solid rgba(255,255,255,0.06); }
 .stAlert { background: rgba(255,255,255,0.04) !important; border: 1px solid rgba(255,255,255,0.09) !important; border-radius: 10px !important; }
+[data-testid="stExpander"] { border: 1px solid rgba(255,255,255,0.09) !important; border-radius: 10px !important; background: #0C0C0E !important; }
 
 /* ledger rows */
 .ledger-head { display: flex; align-items: center; gap: 10px; font-family: 'JetBrains Mono'; font-size: 11px; margin: 2px 0 10px; flex-wrap: wrap; }
@@ -215,14 +209,14 @@ audio { width: 100%; height: 32px; }
 .mono { font-family: 'JetBrains Mono'; font-size: 11px; color: #85858C; }
 .strip-lbl { font-family: 'JetBrains Mono'; font-size: 9px; letter-spacing: 0.14em; color: #63636B; margin: 0 0 6px; }
 
-/* subtle reveal — 16px only */
-.reveal { opacity: 0; transform: translateY(16px); transition: opacity 700ms cubic-bezier(0.32,0.72,0,1), transform 700ms cubic-bezier(0.32,0.72,0,1); will-change: transform; }
-.reveal.in { opacity: 1; transform: translateY(0); }
+/* entrance — pure CSS keyframes (Streamlit strips <script>, so no JS reveals) */
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+div[data-testid="stContainer"] { animation: rise 0.45s cubic-bezier(0.32,0.72,0,1) both; }
+section[data-testid="stColumns"] > div:nth-child(2) div[data-testid="stContainer"] { animation-delay: 0.06s; }
+section[data-testid="stColumns"] > div:nth-child(3) div[data-testid="stContainer"] { animation-delay: 0.12s; }
 
 @media (max-width: 900px) {
-  .transport { gap: 8px; }
-  .transport .tlink, .transport .sep { display: none; }
-  .burger { display: block; }
   .mast h1 { font-size: 19px; }
   .readout { width: 100%; overflow-x: auto; }
   section[data-testid="stColumns"] { flex-direction: column !important; }
@@ -231,112 +225,68 @@ audio { width: 100%; height: 32px; }
 }
 """
 
-REVEAL_JS = """
-<script>
-(function(){
-  const io = new IntersectionObserver((es)=>{
-    es.forEach(e=>{ if(e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target);} });
-  },{threshold:0.08});
-  const hook = ()=>{
-    document.querySelectorAll('div[data-testid="stContainer"]').forEach(el=>{
-      if(!el.classList.contains('reveal')){ el.classList.add('reveal'); io.observe(el); }
-    });
-  };
-  hook();
-  new MutationObserver(hook).observe(document.body,{childList:true,subtree:true});
-  window.toggleMenu = function(){
-    document.getElementById('burger').classList.toggle('open');
-    document.getElementById('menuOverlay').classList.toggle('open');
-  };
-})();
-</script>
-"""
-
 st.markdown(f"<style>{THEME_CSS}</style>", unsafe_allow_html=True)
 st.markdown('<div class="grain"></div>', unsafe_allow_html=True)
-st.markdown(
-    """
-<div class="transport">
-  <div class="mk"><span class="led"></span> MM-01 · MELODY MORPH</div>
-  <div class="sep"></div>
-  <a class="tlink" href="#console">CONSOLE</a>
-  <a class="tlink" href="#ledger">LEDGER</a>
-  <a class="tlink" href="#spec">SPEC</a>
-  <a class="rec" href="#console">● RUN</a>
-  <div class="burger" id="burger" onclick="toggleMenu()"><span></span><span></span><span></span></div>
-</div>
-<div class="menu-overlay" id="menuOverlay">
-  <a href="#console">01 / Console</a>
-  <a href="#ledger">02 / Ledger</a>
-  <a href="#spec">03 / Spec</a>
-</div>
-""",
-    unsafe_allow_html=True,
-)
 
-if not Path(CHECKPOINT_PATH).exists():
-    with st.container():
-        st.markdown('<div class="mod-label amber">MM-01 // NO TAPE LOADED</div>', unsafe_allow_html=True)
-        st.markdown("**Checkpoint missing.** Train once, then reload.")
-        st.code("uv run melodymorph prepare-data\nuv run melodymorph train --config configs/base.yaml")
-    st.stop()
-
-model, tokenizer = get_model(CHECKPOINT_PATH)
-device = str(next(model.parameters()).device)
-
-if "mm_candidates" not in st.session_state:
-    st.session_state.mm_candidates = []
+# Session defaults (setdefault: safe for widget keys only before first render)
+st.session_state.setdefault("mm_candidates", [])
+st.session_state.setdefault("mm_mode", "continuation")
+st.session_state.setdefault("mm_sig", None)
 if "mm_seed" not in st.session_state:
-    st.session_state.mm_seed = None
-if "mm_sig" not in st.session_state:
-    st.session_state.mm_sig = None
+    st.session_state.mm_seed = parse_note_string(PRESET_SEEDS[DEFAULT_PRESET])
 
-st.markdown(
-    f"""
-<div class="mast" id="console">
-  <div>
-    <h1>MelodyMorph <span>MM-01 · motif console</span></h1>
-    <p>SEED 5–15 NOTES → k SAMPLED CONTINUATIONS / VARIATIONS · GRAMMAR-MASKED · MOTIF-FILTERED</p>
-  </div>
-  <div class="readout">
-    <div><span class="k">ENGINE</span><span class="v">decoder · 3.4M</span></div>
-    <div><span class="k">VOCAB</span><span class="v">73 REMI</span></div>
-    <div><span class="k">GRID</span><span class="v">16th · 4/4</span></div>
-    <div><span class="k">DEVICE</span><span class="v">{device}</span></div>
-  </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
 
-col_src, col_view, col_ctl = st.columns([1, 1.7, 1], gap="medium")
-
-with col_ctl:
-    with st.container():
-        st.markdown('<div class="mod-label">CTL // GENERATION</div>', unsafe_allow_html=True)
-        mode = st.radio("Mode", ["continuation", "variation"],
-                        format_func=lambda m: "CONT — extend" if m == "continuation" else "VAR — re-imagine")
-        bars = st.slider("Bars", 1, 8, 4)
-        k = st.slider("Takes", 1, 8, 4)
-        # Per-mode key: Streamlit otherwise keeps the old mode's value and the
-        # variation default (1.15) would never apply after switching modes.
-        temperature = st.slider("Temp", 0.5, 1.5,
-                                0.95 if mode == "continuation" else 1.15, 0.05,
-                                key=f"temp_{mode}")
-        top_p = st.slider("Top-p", 0.5, 1.0, 0.95, 0.01, key="top_p")
-        tempo = st.slider("BPM", 60, 160, 100, 5, key="bpm")
-        go = st.button("RUN  ●", type="primary", use_container_width=True)
-        shuffle = st.button("SHUFFLE SEED + DIALS", type="secondary", use_container_width=True)
-        st.markdown(f"<div class='mono'>ckpt · {CHECKPOINT_PATH}</div>", unsafe_allow_html=True)
-
-if shuffle:
+def _shuffle_dials():
+    """Shuffle callback: runs before widgets instantiate, so writing widget
+    keys here is legal (writing them in the script body after render is not)."""
+    m = st.session_state.get("ctl_mode", "continuation")
     st.session_state["src_choice"] = "Preset"
     st.session_state["preset_name"] = random.choice(list(PRESET_SEEDS))
-    st.session_state[f"temp_{mode}"] = round(random.uniform(0.8, 1.3) * 20) / 20
+    st.session_state[f"temp_{m}"] = round(random.uniform(0.8, 1.3) * 20) / 20
     st.session_state["top_p"] = round(random.uniform(0.85, 1.0), 2)
-    st.rerun()
 
-with col_src:
+
+def topbar():
+    """Status strip + working page nav. Rendered first on every page."""
+    if not Path(CHECKPOINT_PATH).exists():
+        with st.container():
+            st.markdown('<div class="mod-label amber">MM-01 // NO TAPE LOADED</div>', unsafe_allow_html=True)
+            st.markdown("**Checkpoint missing.** Train once, then reload.")
+            st.code("uv run melodymorph prepare-data\nuv run melodymorph train --config configs/base.yaml")
+        st.stop()
+    n = len(st.session_state["mm_candidates"])
+    abbr = {"continuation": "CONT", "variation": "VAR"}.get(st.session_state["mm_mode"], "—")
+    st.markdown(
+        f"<div class='topbar'><div class='mk'><span class='led'></span>MM-01 · MELODY MORPH</div>"
+        f"<div class='tstatus'>TAKES {n:02d} · {abbr}</div></div>",
+        unsafe_allow_html=True,
+    )
+    c1, c2, c3 = st.columns(3, gap="small")
+    with c1:
+        st.page_link(studio_pg, label="01 / CONSOLE")
+    with c2:
+        st.page_link(takes_pg, label=f"02 / TAKES ({n})")
+    with c3:
+        st.page_link(spec_pg, label="03 / SPEC")
+
+
+def masthead(title: str, sub: str, hint: str):
+    model, _ = get_model(CHECKPOINT_PATH)
+    device = str(next(model.parameters()).device)
+    st.markdown(
+        f"<div class='mast'><div><h1>{title}</h1><p>{hint}</p></div>"
+        "<div class='readout'>"
+        "<div><span class='k'>ENGINE</span><span class='v'>decoder · 3.4M</span></div>"
+        "<div><span class='k'>VOCAB</span><span class='v'>73 REMI</span></div>"
+        "<div><span class='k'>GRID</span><span class='v'>16th · 4/4</span></div>"
+        f"<div><span class='k'>DEVICE</span><span class='v'>{device}</span></div>"
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_seed_editor():
+    """SRC module. Parses the current input and stores it; returns (seed, tempo)."""
     with st.container():
         st.markdown('<div class="mod-label amber">SRC // SEED INPUT</div>', unsafe_allow_html=True)
         source = st.radio("Input", ["Preset", "Text", "MIDI"], horizontal=True, key="src_choice")
@@ -346,7 +296,7 @@ with col_src:
             st.code(PRESET_SEEDS[name])
             seed = parse_note_string(PRESET_SEEDS[name])
         elif source == "Text":
-            text = st.text_area("Notation", value=PRESET_SEEDS["Ode to Joy (opening)"],
+            text = st.text_area("Notation", value=PRESET_SEEDS[DEFAULT_PRESET],
                                 help="w h q e s + '.' · #/b · R = rest", key="seed_text")
             if text.strip():
                 try:
@@ -367,113 +317,183 @@ with col_src:
                     st.error(str(exc))
             else:
                 st.markdown("<div class='mono'>— awaiting file.</div>", unsafe_allow_html=True)
-        # No stale previews: an invalid input clears the monitor explicitly.
+        # Invalid input clears the monitor; takes stay visible (ledger flags stale).
         st.session_state.mm_seed = seed
-        if seed is None and st.session_state.mm_candidates:
-            pass  # takes stay visible; the ledger flags them stale (see below)
+    return seed
 
-with col_view:
+
+def render_control_deck():
+    """CTL module. Returns (mode, bars, k, temperature, top_p, tempo, go)."""
+    with st.container():
+        st.markdown('<div class="mod-label">CTL // GENERATION</div>', unsafe_allow_html=True)
+        mode = st.radio("Mode", ["continuation", "variation"],
+                        format_func=lambda m: "CONT — extend" if m == "continuation" else "VAR — re-imagine",
+                        key="ctl_mode")
+        bars = st.slider("Bars", 1, 8, 4)
+        k = st.slider("Takes", 1, 8, 4)
+        # Per-mode key: otherwise Streamlit keeps the old mode's value and the
+        # variation default (1.15) never applies after switching modes.
+        temperature = st.slider("Temp", 0.5, 1.5,
+                                0.95 if mode == "continuation" else 1.15, 0.05,
+                                key=f"temp_{mode}")
+        top_p = st.slider("Top-p", 0.5, 1.0, 0.95, 0.01, key="top_p")
+        tempo = st.slider("BPM", 60, 160, 100, 5, key="bpm")
+        go = st.button("RUN  ●", type="primary", use_container_width=True)
+        st.button("SHUFFLE SEED + DIALS", type="secondary", use_container_width=True,
+                  on_click=_shuffle_dials)
+        st.markdown(f"<div class='mono'>ckpt · {CHECKPOINT_PATH}</div>", unsafe_allow_html=True)
+    return mode, bars, k, temperature, top_p, tempo, go
+
+
+def run_generation(model, tokenizer, device, seed, sig, mode, bars, k, temperature, top_p):
+    try:
+        with st.spinner("Sampling takes…"):
+            fn = generate_continuations if mode == "continuation" else generate_variations
+            st.session_state.mm_candidates = fn(
+                model, tokenizer, seed, n_bars=bars, k=k,
+                temperature=float(temperature), top_p=float(top_p), device=device)
+            st.session_state.mm_sig = sig
+            st.session_state.mm_mode = mode
+    except Exception as exc:  # never blank-crash the console
+        st.error(f"Generation failed: {exc}")
+        return False
+    return True
+
+
+def take_card(i, cand, tempo, mm_mode):
+    with st.container():
+        score = f"{cand.motif_score:.2f}" if cand.motif_score is not None else "—"
+        lo, hi = min(n.pitch for n in cand.melody), max(n.pitch for n in cand.melody)
+        st.markdown(
+            f"<div class='ledger-head'><span class='idx'>TAKE {i + 1:02d}</span>"
+            f"<span class='score'>MOTIF {score}</span>"
+            f"<span class='meta'>{len(cand.melody)} notes · "
+            f"{melody_duration(cand.melody)} steps · {pitch_name(lo)}–{pitch_name(hi)}</span></div>",
+            unsafe_allow_html=True,
+        )
+        fig = dark_roll(cand.melody, seed_len=cand.seed_len_steps)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        a_col, s_col = st.columns([1.7, 1])
+        with a_col:
+            st.audio(melody_to_wav_bytes(cand.melody, tempo_bpm=tempo), format="audio/wav")
+            midi_path = Path("out") / f"{mm_mode}_{i + 1}.mid"
+            write_midi(cand.melody, midi_path, tempo_bpm=tempo)
+            st.download_button("SAVE .MID", data=midi_path.read_bytes(),
+                               file_name=midi_path.name, mime="audio/midi",
+                               key=f"dl_{i}", use_container_width=True)
+        with s_col:
+            st.markdown("<div class='strip-lbl'>CONTOUR</div>", unsafe_allow_html=True)
+            sfig = contour_strip(cand.melody, seed_len=cand.seed_len_steps)
+            st.pyplot(sfig, use_container_width=True)
+            plt.close(sfig)
+            with st.expander("RATE TAKE"):
+                mus = st.slider("Musicality", 1, 5, 3, key=f"mus_{i}")
+                mot = st.slider("Motif lock", 1, 5, 3, key=f"mot_{i}")
+                if st.button("LOG RATING", key=f"rate_{i}", use_container_width=True):
+                    log_human_rating("out/ratings.csv", f"{mm_mode}_{i + 1}", mus, mot)
+                    st.toast(f"Take {i + 1}: {mus}/5 musicality, {mot}/5 motif — logged.")
+
+
+def studio_view():
+    topbar()
+    model, tokenizer = get_model(CHECKPOINT_PATH)
+    device = str(next(model.parameters()).device)
+    masthead("MelodyMorph <span>MM-01 · console</span>", "",
+             "SEED 5–15 NOTES → k SAMPLED TAKES · GRAMMAR-MASKED · MOTIF-FILTERED")
+
+    # Big seed monitor first — the graph is the point of the page.
     with st.container():
         st.markdown('<div class="mod-label">VIEW // SEED MONITOR</div>', unsafe_allow_html=True)
         seed = st.session_state.mm_seed
+        tempo = st.session_state.get("bpm", 100)
         if seed is not None:
             fig = dark_roll(seed, seed_len=melody_duration(seed) + 1)
             st.pyplot(fig, use_container_width=True)
             plt.close(fig)
-            st.audio(melody_to_wav_bytes(seed, tempo_bpm=tempo), format="audio/wav")
-            lo, hi = min(n.pitch for n in seed), max(n.pitch for n in seed)
-            st.markdown(
-                f"<div class='mono'>amber = seed · {len(seed)} notes · "
-                f"{melody_duration(seed)} steps · range {pitch_name(lo)}–{pitch_name(hi)}"
-                f"<br>{melody_to_note_string(seed)}</div>",
-                unsafe_allow_html=True,
-            )
+            v1, v2 = st.columns([1.6, 1])
+            with v1:
+                st.audio(melody_to_wav_bytes(seed, tempo_bpm=tempo), format="audio/wav")
+            with v2:
+                lo, hi = min(n.pitch for n in seed), max(n.pitch for n in seed)
+                st.markdown(
+                    f"<div class='mono'>{len(seed)} notes · {melody_duration(seed)} steps<br>"
+                    f"range {pitch_name(lo)}–{pitch_name(hi)}</div>",
+                    unsafe_allow_html=True,
+                )
+            st.markdown(f"<div class='mono'>{melody_to_note_string(seed)}</div>", unsafe_allow_html=True)
         else:
-            st.markdown("<div class='mono'>— no signal. Load a seed in SRC.</div>", unsafe_allow_html=True)
+            st.markdown("<div class='mono'>— no signal. Load a seed in SRC below.</div>",
+                        unsafe_allow_html=True)
 
-seed = st.session_state.mm_seed
-sig = (melody_to_note_string(seed), mode, bars, k,
-       round(float(temperature), 3), round(float(top_p), 3)) if seed is not None else None
+    col_src, col_ctl = st.columns(2, gap="medium")
+    with col_src:
+        seed = render_seed_editor()
+    with col_ctl:
+        mode, bars, k, temperature, top_p, tempo, go = render_control_deck()
 
-if go:
-    if seed is None:
-        st.warning("Nothing to run — load a valid seed in SRC first.")
-    else:
-        try:
-            with st.spinner("Sampling takes…"):
-                fn = generate_continuations if mode == "continuation" else generate_variations
-                st.session_state.mm_candidates = fn(
-                    model, tokenizer, seed, n_bars=bars, k=k,
-                    temperature=float(temperature), top_p=float(top_p), device=device)
-                st.session_state.mm_sig = sig
-        except Exception as exc:  # never blank-crash the console
-            st.error(f"Generation failed: {exc}")
+    seed = st.session_state.mm_seed
+    sig = (melody_to_note_string(seed), mode, bars, k,
+           round(float(temperature), 3), round(float(top_p), 3)) if seed is not None else None
+    if go:
+        if seed is None:
+            st.warning("Nothing to run — load a valid seed in SRC first.")
+        elif run_generation(model, tokenizer, device, seed, sig, mode, bars, k,
+                            temperature, top_p):
+            st.switch_page(takes_pg)
 
-candidates = st.session_state.mm_candidates
-stale = bool(candidates) and sig != st.session_state.mm_sig
-state_badge = ("<span class='stale'>STALE — press RUN</span>" if stale
-               else "<span class='fresh'>FRESH</span>") if candidates else ""
 
-st.markdown(
-    f"<div class='mast' id='ledger' style='margin-top:26px'>"
-    f"<div><h1>Tape ledger <span>— {len(candidates)} take{'s' if len(candidates) != 1 else ''} {state_badge}</span></h1>"
-    f"<p>MINT = GENERATED · AMBER = SEED REFERENCE</p></div></div>",
-    unsafe_allow_html=True,
-)
-
-if not candidates:
-    with st.container():
-        st.markdown('<div class="mod-label">LEDGER // IDLE</div>', unsafe_allow_html=True)
-        st.markdown("<div class='mono'>Press RUN in CTL. Takes land here as numbered ledger rows — deduped, motif-scored.</div>", unsafe_allow_html=True)
-else:
-    out_dir = Path("out")
-    out_dir.mkdir(exist_ok=True)
+def takes_view():
+    topbar()
+    masthead("Tape ledger <span>— generated takes</span>", "",
+             "MINT = GENERATED · AMBER = SEED REFERENCE")
+    candidates = st.session_state.mm_candidates
+    tempo = st.session_state.get("bpm", 100)
+    if not candidates:
+        with st.container():
+            st.markdown('<div class="mod-label">LEDGER // IDLE</div>', unsafe_allow_html=True)
+            st.markdown("<div class='mono'>No takes yet. Build a seed on the Console and press RUN — "
+                        "you will land back here automatically.</div>", unsafe_allow_html=True)
+            st.page_link(studio_pg, label="→ OPEN CONSOLE")
+        return
+    seed = st.session_state.mm_seed
+    mode, bars, k = st.session_state.get("ctl_mode", "continuation"), 4, len(candidates)
+    sig = st.session_state.mm_sig
+    stale = sig is None or (seed is not None and sig[0] != melody_to_note_string(seed))
+    badge = ("<span class='stale'>STALE — seed changed, press RUN on Console</span>" if stale
+             else "<span class='fresh'>FRESH</span>")
+    st.markdown(
+        f"<div class='ledger-head'><span class='idx'>{len(candidates):02d} TAKES</span>{badge}</div>",
+        unsafe_allow_html=True,
+    )
+    Path("out").mkdir(exist_ok=True)
     mm_mode = "variation" if any(c.motif_score is not None for c in candidates) else "continuation"
     for i, cand in enumerate(candidates):
-        with st.container():
-            score = f"{cand.motif_score:.2f}" if cand.motif_score is not None else "—"
-            lo, hi = min(n.pitch for n in cand.melody), max(n.pitch for n in cand.melody)
-            st.markdown(
-                f"<div class='ledger-head'><span class='idx'>TAKE {i + 1:02d}</span>"
-                f"<span class='score'>MOTIF {score}</span>"
-                f"<span class='meta'>{len(cand.melody)} notes · "
-                f"{melody_duration(cand.melody)} steps · {pitch_name(lo)}–{pitch_name(hi)}</span></div>",
-                unsafe_allow_html=True,
-            )
-            fig = dark_roll(cand.melody, seed_len=cand.seed_len_steps)
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
-            a_col, s_col = st.columns([1.7, 1])
-            with a_col:
-                st.audio(melody_to_wav_bytes(cand.melody, tempo_bpm=tempo), format="audio/wav")
-                midi_path = out_dir / f"{mm_mode}_{i + 1}.mid"
-                write_midi(cand.melody, midi_path, tempo_bpm=tempo)
-                st.download_button("SAVE .MID", data=midi_path.read_bytes(),
-                                   file_name=midi_path.name, mime="audio/midi",
-                                   key=f"dl_{i}", use_container_width=True)
-            with s_col:
-                st.markdown("<div class='strip-lbl'>CONTOUR</div>", unsafe_allow_html=True)
-                sfig = contour_strip(cand.melody, seed_len=cand.seed_len_steps)
-                st.pyplot(sfig, use_container_width=True)
-                plt.close(sfig)
+        take_card(i, cand, tempo, mm_mode)
 
-st.markdown(
-    "<div class='mast' id='spec' style='margin-top:26px'>"
-    "<div><h1>Spec sheet <span>— what the box does</span></h1></div></div>",
-    unsafe_allow_html=True,
-)
-with st.container():
-    st.markdown(
-        """<table class="spec">
+
+def spec_view():
+    topbar()
+    masthead("Spec sheet <span>— what the box does</span>", "", "MM-01 · LAB 3 · SYMBOLIC MIDI ONLY")
+    with st.container():
+        st.markdown(
+            """<table class="spec">
 <tr><td>01 · Tokenizer</td><td>REMI — BAR / POS / PITCH / DUR on a 16th grid. Essen folksongs + Bach soprano lines, transposed to a common key.</td></tr>
 <tr><td>02 · Model</td><td>Causal decoder-only transformer, ~3–4M params, trained from scratch on windowed melodies with transposition augmentation.</td></tr>
 <tr><td>03 · Sampling</td><td>Temperature / top-p under a grammar mask — invalid sequences are impossible. Variation mode regenerates bar one hot and keeps the close-but-not-identical band.</td></tr>
 </table>""",
-        unsafe_allow_html=True,
-    )
+            unsafe_allow_html=True,
+        )
+    rp = Path("out/ratings.csv")
+    n_ratings = max(sum(1 for _ in rp.open()) - 1, 0) if rp.exists() else 0
+    with st.container():
+        st.markdown('<div class="mod-label">EVAL // HUMAN RATINGS</div>', unsafe_allow_html=True)
+        st.markdown(f"<div class='mono'>{n_ratings} rating{'s' if n_ratings != 1 else ''} logged · "
+                    "out/ratings.csv — rate takes on the Takes page.</div>", unsafe_allow_html=True)
 
-st.markdown(
-    "<div class='mono' style='text-align:center; padding:26px 0 6px'>MELODY MORPH MM-01 · LAB 3 · SYMBOLIC MIDI ONLY</div>",
-    unsafe_allow_html=True,
-)
-st.markdown(REVEAL_JS, unsafe_allow_html=True)
+
+studio_pg = st.Page(studio_view, title="Console", url_path="console")
+takes_pg = st.Page(takes_view, title="Takes", url_path="takes")
+spec_pg = st.Page(spec_view, title="Spec", url_path="spec")
+pg = st.navigation([studio_pg, takes_pg, spec_pg], position="hidden")
+pg.run()
