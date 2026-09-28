@@ -9,21 +9,39 @@ import numpy as np
 
 from .tokenizer import STEPS_PER_BEAT, Melody
 
-SAMPLE_RATE = 22050
+SAMPLE_RATE = 44100
 
 
 def _adsr_envelope(n_samples: int, sr: int = SAMPLE_RATE) -> np.ndarray:
-    attack = min(int(0.01 * sr), n_samples // 4 or 1)
-    release = min(int(0.08 * sr), n_samples // 3 or 1)
-    sustain_len = max(n_samples - attack - release, 0)
+    if n_samples <= 0:
+        return np.zeros(0, dtype=np.float64)
+    if n_samples == 1:
+        return np.ones(1, dtype=np.float64)
 
-    env = np.concatenate(
-        [
-            np.linspace(0.0, 1.0, attack, endpoint=False),
-            np.full(sustain_len, 1.0),
-            np.linspace(1.0, 0.0, release),
-        ]
-    )
+    # Proportional allocation for short notes, absolute for longer notes
+    a_len = min(int(0.015 * sr), max(1, n_samples // 6))
+    d_len = min(int(0.03 * sr), max(1, n_samples // 6))
+    r_len = min(int(0.05 * sr), max(1, n_samples // 4))
+
+    # If combined lengths exceed n_samples, scale them down proportionally
+    total = a_len + d_len + r_len
+    if total > n_samples:
+        scale = n_samples / total
+        a_len = max(1, int(a_len * scale))
+        d_len = max(1, int(d_len * scale))
+        r_len = max(1, n_samples - a_len - d_len)
+        sustain_len = 0
+    else:
+        sustain_len = n_samples - (a_len + d_len + r_len)
+
+    sustain_level = 0.75
+
+    attack = np.linspace(0.0, 1.0, a_len, endpoint=False)
+    decay = np.linspace(1.0, sustain_level, d_len, endpoint=False)
+    sustain = np.full(sustain_len, sustain_level)
+    release = np.linspace(sustain_level, 0.0, r_len)
+
+    env = np.concatenate([attack, decay, sustain, release])
     if len(env) < n_samples:
         env = np.pad(env, (0, n_samples - len(env)))
     return env[:n_samples]
@@ -32,11 +50,12 @@ def _adsr_envelope(n_samples: int, sr: int = SAMPLE_RATE) -> np.ndarray:
 def _note_wave(freq: float, duration_s: float, sr: int = SAMPLE_RATE) -> np.ndarray:
     n = max(int(duration_s * sr), 1)
     t = np.arange(n) / sr
-    # a few harmonics give a less sterile timbre than a bare sine
+    # Richer harmonic series with natural roll-off
     wave_ = (
         1.00 * np.sin(2 * np.pi * freq * t)
-        + 0.35 * np.sin(2 * np.pi * 2 * freq * t)
-        + 0.15 * np.sin(2 * np.pi * 3 * freq * t)
+        + 0.40 * np.sin(2 * np.pi * 2 * freq * t)
+        + 0.18 * np.sin(2 * np.pi * 3 * freq * t)
+        + 0.08 * np.sin(2 * np.pi * 4 * freq * t)
     )
     wave_ *= _adsr_envelope(n, sr)
     return wave_

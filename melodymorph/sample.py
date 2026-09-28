@@ -17,24 +17,31 @@ from .tokenizer import Melody, MelodyTokenizer
 # broken output, independent of how well-trained the model is.
 # --------------------------------------------------------------------------
 class GrammarState:
-    """Tracks whether the next legal token is a POS, a PITCH, or a DUR."""
+    """Tracks whether the next legal token is a POS, a PITCH, or a DUR,
+    and enforces strictly monotonic position within each bar."""
 
     POS, PITCH, DUR = "pos", "pitch", "dur"
 
     def __init__(self, tokenizer: MelodyTokenizer):
         self.tok = tokenizer
         self.stage = self.POS  # after BOS or BAR, a POS (or another BAR) is next
+        self.current_pos = -1
+        self.notes_in_bar = 0
 
     def update(self, token_id: int) -> None:
         tok = self.tok
         if token_id == tok.bar_id:
             self.stage = self.POS
+            self.current_pos = -1
+            self.notes_in_bar = 0
         elif tok.is_pos(token_id):
             self.stage = self.PITCH
+            self.current_pos = tok.pos_of(token_id)
         elif tok.is_pitch(token_id):
             self.stage = self.DUR
         elif tok.is_dur(token_id):
             self.stage = self.POS
+            self.notes_in_bar += 1
         # BOS/PAD/EOS don't change the grammar state (EOS ends generation anyway)
 
     def allowed_ids(self, allow_eos: bool) -> list[int]:
@@ -43,17 +50,38 @@ class GrammarState:
             return tok.pitch_ids
         if self.stage == self.DUR:
             return tok.dur_ids
-        # POS stage: a POS token, a fresh BAR, or (optionally) EOS
-        ids = list(tok.pos_ids) + [tok.bar_id]
+
+        # POS stage: only allow positions >= current_pos to guarantee monotonic time
+        start_pos = max(0, self.current_pos)
+        pos_allowed = [tok.pos_ids[p] for p in range(start_pos, 16)]
+        ids = list(pos_allowed)
+
+        # Allow BAR token if we've emitted notes in this bar or haven't emitted consecutive empty bars
+        if self.notes_in_bar > 0 or self.current_pos >= 0:
+            ids.append(tok.bar_id)
+
         if allow_eos:
             ids.append(tok.eos_id)
-        return ids
+        return ids if ids else tok.pos_ids
 
 
 def _apply_grammar_mask(logits: torch.Tensor, allowed: list[int]) -> torch.Tensor:
     mask = torch.full_like(logits, float("-inf"))
     mask[..., allowed] = 0.0
     return logits + mask
+
+
+def _apply_repetition_penalty(
+    logits: torch.Tensor, generated_tokens: list[int], penalty: float = 1.0, window: int = 64
+) -> torch.Tensor:
+    """Standard repetition penalty (Keskar et al.): dampens repetitive loops."""
+    if penalty == 1.0 or not generated_tokens:
+        return logits
+    recent = set(generated_tokens[-window:])
+    for tid in recent:
+        val = logits[..., tid]
+        logits[..., tid] = torch.where(val > 0, val / penalty, val * penalty)
+    return logits
 
 
 def _top_k_top_p(logits: torch.Tensor, top_k: int, top_p: float) -> torch.Tensor:
@@ -83,15 +111,18 @@ def generate(
     temperature: float = 1.0,
     top_k: int = 0,
     top_p: float = 0.95,
+    repetition_penalty: float = 1.15,
     device: str | None = None,
     stop_on_eos: bool = True,
     min_new_tokens: int = 12,
 ) -> list[int]:
     """Autoregressively extend ``prompt_ids`` under the REMI grammar mask."""
     model.eval()
-    # The sampling tensors must live on the model's own device. A stale
-    # "cpu" default used to crash CUDA-loaded checkpoints with a
-    # device-mismatch RuntimeError, so the model always wins.
+    if device is not None:
+        target_device = torch.device(device)
+        model_device = next(model.parameters()).device
+        if model_device != target_device:
+            model = model.to(target_device)
     device = str(next(model.parameters()).device)
     ids = list(prompt_ids)
 
@@ -102,13 +133,34 @@ def generate(
     x = torch.tensor([ids], dtype=torch.long, device=device)
 
     for step in range(max_new_tokens):
-        logits = model.next_token_logits(x) / max(temperature, 1e-5)
+        raw_logits = model.next_token_logits(x)
         allow_eos = stop_on_eos and (len(ids) - len(prompt_ids)) >= min_new_tokens
-        logits = _apply_grammar_mask(logits, state.allowed_ids(allow_eos))
-        logits = _top_k_top_p(logits, top_k, top_p)
+        allowed = state.allowed_ids(allow_eos)
+        logits = _apply_grammar_mask(raw_logits, allowed)
 
-        probs = F.softmax(logits, dim=-1)
-        next_id = torch.multinomial(probs, num_samples=1)
+        if repetition_penalty > 1.0:
+            logits = _apply_repetition_penalty(logits, ids, penalty=repetition_penalty)
+
+        if temperature <= 1e-4:
+            # Deterministic greedy decoding
+            next_id = torch.argmax(logits, dim=-1, keepdim=True)
+        else:
+            logits = logits / max(temperature, 1e-4)
+            logits = _top_k_top_p(logits, top_k, top_p)
+            probs = F.softmax(logits, dim=-1)
+
+            # Defensive guard against NaN or total probability collapse
+            if torch.isnan(probs).any() or probs.sum() <= 0:
+                valid_mask = torch.isfinite(logits)
+                if valid_mask.any():
+                    probs = valid_mask.float() / valid_mask.float().sum()
+                else:
+                    # fallback to allowed ids uniform
+                    probs = torch.zeros_like(logits)
+                    probs[..., allowed] = 1.0 / len(allowed)
+
+            next_id = torch.multinomial(probs, num_samples=1)
+
         next_val = int(next_id.item())
 
         if next_val == tokenizer.eos_id:

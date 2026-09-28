@@ -35,15 +35,27 @@ def build_token_stream(
     melodies: list[Melody],
     tokenizer: MelodyTokenizer,
     transpose_range: int = 0,
+    seed: int = 1337,
 ) -> list[int]:
-    """Encode melodies (optionally with transposed copies) into one flat stream."""
-    stream: list[int] = []
-    shifts = range(-transpose_range, transpose_range + 1) if transpose_range else [0]
-    for melody in melodies:
-        for shift in shifts:
+    """Encode melodies (optionally with transposed copies) into one flat stream.
+
+    Augmented melodies are shuffled so that transposed copies of the same tune
+    never sit directly adjacent within a single Transformer attention window.
+    """
+    items: list[Melody] = []
+    shifts = list(range(-transpose_range, transpose_range + 1)) if transpose_range else [0]
+    for shift in shifts:
+        for melody in melodies:
             shifted = transpose(melody, shift)
             if shifted is not None:
-                stream.extend(tokenizer.encode(shifted))
+                items.append(shifted)
+
+    # Shuffle to decouple parallel transposed melodies in the stream
+    random.Random(seed).shuffle(items)
+
+    stream: list[int] = []
+    for m in items:
+        stream.extend(tokenizer.encode(m))
     return stream
 
 
@@ -58,7 +70,10 @@ class MelodyWindowDataset(Dataset):
         self.data = torch.tensor(stream, dtype=torch.long)
         self.block_size = block_size
         self.stride = stride or block_size // 2
-        self.starts = list(range(0, len(self.data) - block_size - 1, self.stride))
+        # Ensure we capture all valid windows up to the boundary
+        self.starts = list(range(0, len(self.data) - block_size, self.stride))
+        if not self.starts and len(self.data) >= block_size + 1:
+            self.starts = [0]
 
     def __len__(self) -> int:
         return len(self.starts)

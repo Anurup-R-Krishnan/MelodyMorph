@@ -26,3 +26,31 @@ def test_write_and_read_midi_roundtrip():
         assert path.exists()
         recovered = read_midi(path)
     assert [n.pitch for n in recovered] == [n.pitch for n in melody]
+
+
+def test_write_midi_contains_end_of_track():
+    import mido
+    melody = parse_note_string("C4/q E4/q")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "track.mid"
+        write_midi(melody, path)
+        mf = mido.MidiFile(str(path))
+        # Last message of the track must be end_of_track
+        assert mf.tracks[0][-1].type == "end_of_track"
+
+
+def test_lossless_rest_roundtrip():
+    from melodymorph.midi_io import melody_to_note_string
+    # Melody with rest between note 1 and note 2
+    melody = parse_note_string("C4/q R/h E4/q")
+    text = melody_to_note_string(melody)
+    reparsed = parse_note_string(text)
+    assert [(n.onset, n.pitch, n.dur) for n in reparsed] == [(n.onset, n.pitch, n.dur) for n in melody]
+
+
+def test_invalid_rest_raises():
+    import pytest
+    with pytest.raises(ValueError, match="invalid rest duration"):
+        parse_note_string("C4/q R/invalid E4/q")
+    with pytest.raises(ValueError, match="cannot parse note"):
+        parse_note_string("re4")

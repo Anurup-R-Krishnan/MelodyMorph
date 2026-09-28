@@ -29,6 +29,8 @@ def _cmd_train(args: argparse.Namespace) -> None:
     from .train import TrainConfig, train
 
     cfg = TrainConfig.from_yaml(args.config)
+    if getattr(args, "resume", None):
+        cfg.resume_from = args.resume
     result = train(cfg)
     log.info("training complete, best val loss = %.4f", result["best_val_loss"])
 
@@ -62,7 +64,8 @@ def _cmd_generate(args: argparse.Namespace) -> None:
     candidates = fn(
         model, tokenizer, seed,
         n_bars=args.bars, k=args.k, temperature=args.temperature,
-        top_k=args.top_k, top_p=args.top_p, device=device,
+        top_k=args.top_k, top_p=args.top_p, repetition_penalty=args.repetition_penalty,
+        device=device,
     )
 
     out_dir = Path(args.out)
@@ -83,7 +86,12 @@ def _cmd_generate(args: argparse.Namespace) -> None:
 def _cmd_evaluate(args: argparse.Namespace) -> None:
     from .corpus import load_corpus
     from .dataset import split_melodies
-    from .evaluate import markov_baseline_perplexity, perplexity_and_accuracy
+    from .evaluate import (
+        evaluate_generations,
+        markov_baseline_perplexity,
+        pitch_markov_baseline_perplexity,
+        perplexity_and_accuracy,
+    )
     from .train import load_checkpoint
 
     model, tokenizer = load_checkpoint(args.checkpoint)
@@ -93,17 +101,40 @@ def _cmd_evaluate(args: argparse.Namespace) -> None:
     train_melodies, val_melodies = split_melodies(melodies, seed=1337)
 
     metrics = perplexity_and_accuracy(model, tokenizer, val_melodies, device)
-    log.info("Transformer  val_loss=%.4f  val_ppl=%.2f  next_token_acc=%.3f",
-              metrics["loss"], metrics["perplexity"], metrics["next_token_accuracy"])
+    log.info(
+        "Transformer  val_loss=%.4f  val_ppl=%.2f  next_token_acc=%.3f  pitch_acc=%.3f",
+        metrics["loss"], metrics["perplexity"], metrics["next_token_accuracy"], metrics["pitch_accuracy"],
+    )
 
     baseline_ppl = markov_baseline_perplexity(tokenizer, train_melodies, val_melodies, order=args.markov_order)
-    log.info("order-%d Markov baseline  val_ppl=%.2f", args.markov_order, baseline_ppl)
+    log.info("order-%d Token Markov baseline   val_ppl=%.2f", args.markov_order, baseline_ppl)
+
+    pitch_baseline_ppl = pitch_markov_baseline_perplexity(train_melodies, val_melodies, order=2)
+    log.info("order-2 Pitch Markov baseline   val_ppl=%.2f", pitch_baseline_ppl)
 
     if metrics["perplexity"] < baseline_ppl:
-        log.info("Transformer beats the Markov baseline (%.2f < %.2f)", metrics["perplexity"], baseline_ppl)
+        log.info("Transformer beats token Markov baseline (%.2f < %.2f)", metrics["perplexity"], baseline_ppl)
     else:
-        log.warning("Transformer did NOT beat the Markov baseline (%.2f >= %.2f) -- consider more training",
+        log.warning("Transformer did NOT beat token Markov baseline (%.2f >= %.2f) -- consider more training",
                     metrics["perplexity"], baseline_ppl)
+
+    if args.sample_generations:
+        from .generate import generate_continuations
+        sample_seeds = val_melodies[:8]
+        generated = []
+        for s in sample_seeds:
+            cands = generate_continuations(model, tokenizer, s, n_bars=2, k=1, device=device)
+            generated.extend(c.melody for c in cands)
+        if generated:
+            gen_metrics = evaluate_generations(generated, train_melodies)
+            log.info(
+                "Sample generation metrics: in_scale=%.1f%%  repetition=%.1f%%  distinctness=%.2f  JS_div=%.4f  rhythm_entropy=%.2f",
+                gen_metrics.in_scale_ratio * 100,
+                gen_metrics.repetition_rate * 100,
+                gen_metrics.pairwise_distinctness,
+                gen_metrics.pitch_class_js_divergence,
+                gen_metrics.rhythm_entropy,
+            )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -119,6 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     tr = sub.add_parser("train", help="train the Transformer")
     tr.add_argument("--config", required=True)
+    tr.add_argument("--resume", help="path to checkpoint to resume training from")
     tr.set_defaults(func=_cmd_train)
 
     gen = sub.add_parser("generate", help="generate continuations/variations from a seed")
@@ -133,6 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     gen.add_argument("--temperature", type=float, default=0.95)
     gen.add_argument("--top-k", type=int, default=0)
     gen.add_argument("--top-p", type=float, default=0.95)
+    gen.add_argument("--repetition-penalty", type=float, default=1.15, help="penalty against token repetition")
     gen.add_argument("--tempo", type=int, default=100)
     gen.add_argument("--out", default="out")
     gen.set_defaults(func=_cmd_generate)
@@ -141,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--checkpoint", default="checkpoints/best.pt")
     ev.add_argument("--cache", default="data/melodies.jsonl")
     ev.add_argument("--markov-order", type=int, default=3)
+    ev.add_argument("--sample-generations", action="store_true", help="evaluate musical quality metrics on generated samples")
     ev.set_defaults(func=_cmd_evaluate)
 
     return p

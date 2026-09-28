@@ -29,7 +29,7 @@ from melodymorph.midi_io import (
 )
 from melodymorph.tokenizer import melody_duration
 from melodymorph.train import load_checkpoint
-from melodymorph.viz import plot_piano_roll
+from melodymorph.viz import contour_strip, plot_piano_roll
 
 st.set_page_config(page_title="MelodyMorph MM-01", page_icon="🎛", layout="wide")
 
@@ -47,62 +47,30 @@ def get_model(checkpoint_path: str):
     return load_checkpoint(checkpoint_path)
 
 
+@st.cache_data
+def get_cached_audio(melody_triples: tuple, tempo: int) -> bytes:
+    from melodymorph.tokenizer import Note
+    melody = [Note(*t) for t in melody_triples]
+    return melody_to_wav_bytes(melody, tempo_bpm=tempo)
+
+
+@st.cache_data
+def get_cached_midi_bytes(melody_triples: tuple, tempo: int) -> bytes:
+    import tempfile
+    from melodymorph.tokenizer import Note
+    melody = [Note(*t) for t in melody_triples]
+    with tempfile.NamedTemporaryFile(suffix=".mid", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        write_midi(melody, tmp_path, tempo_bpm=tempo)
+        return tmp_path.read_bytes()
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 def dark_roll(melody, seed_len=0):
-    """Dark re-skin of viz.plot_piano_roll, sized to fill the page width.
-
-    Recolouring is driven by note onset vs seed_len (patches are added in
-    melody order), never by sniffing the light-theme palette.
-    """
-    fig = plot_piano_roll(melody, seed_len=seed_len, title="")
-    fig.set_size_inches(12.5, 4.4)
-    fig.patch.set_facecolor("#0C0C0E")
-    ax = fig.axes[0]
-    ax.set_facecolor("#0C0C0E")
-    for spine in ax.spines.values():
-        spine.set_color((1, 1, 1, 0.10))
-    ax.tick_params(colors="#85858C", labelsize=8)
-    ax.xaxis.label.set_color("#85858C")
-    ax.xaxis.label.set_fontsize(9)
-    for line in ax.get_lines():
-        if line.get_linestyle() == "--":
-            line.set_color("#D8C79A")  # seed divider
-            line.set_alpha(0.9)
-        else:
-            line.set_color((1, 1, 1, 0.13))
-            line.set_alpha(0.6)
-    for patch, note in zip(ax.patches, melody):
-        if note.onset < seed_len:
-            patch.set_facecolor("#D8C79A")  # dry amber = seed
-            patch.set_edgecolor("#2A2415")
-        else:
-            patch.set_facecolor("#7EE8B8")  # mint = generated
-            patch.set_edgecolor("#0B2E22")
-        patch.set_linewidth(0.6)
-        patch.set_alpha(0.95)
-    fig.tight_layout(pad=1.0)
-    return fig
-
-
-def contour_strip(melody, seed_len=0):
-    """Pitch-contour strip: the motif's shape at a glance."""
-    notes = sorted(melody, key=lambda n: n.onset)
-    fig, ax = plt.subplots(figsize=(4.5, 1.6))
-    fig.patch.set_facecolor("#0C0C0E")
-    ax.set_facecolor("#0C0C0E")
-    if notes:
-        xs = [n.onset for n in notes]
-        ys = [n.pitch for n in notes]
-        if seed_len:
-            ax.axvspan(0, seed_len, color="#D8C79A", alpha=0.08)
-        ax.step(xs, ys, where="post", color="#7EE8B8", linewidth=1.4)
-        ax.plot(xs, ys, "o", color="#7EE8B8", markersize=3)
-        ax.set_xlim(0, max(xs) + 4)
-    for spine in ax.spines.values():
-        spine.set_color((1, 1, 1, 0.10))
-    ax.set_xticks([])
-    ax.set_yticks([])
-    fig.tight_layout(pad=0.4)
-    return fig
+    """Native dark theme render of piano roll."""
+    return plot_piano_roll(melody, seed_len=seed_len, title="", theme="dark")
 
 
 THEME_CSS = """
@@ -271,13 +239,15 @@ def topbar():
 
 
 def masthead(title: str, sub: str, hint: str):
-    model, _ = get_model(CHECKPOINT_PATH)
+    model, tokenizer = get_model(CHECKPOINT_PATH)
     device = str(next(model.parameters()).device)
+    params = model.num_parameters()
+    param_str = f"{params / 1e6:.1f}M" if params >= 1e6 else f"{params / 1e3:.0f}K"
     st.markdown(
         f"<div class='mast'><div><h1>{title}</h1><p>{hint}</p></div>"
         "<div class='readout'>"
-        "<div><span class='k'>ENGINE</span><span class='v'>decoder · 3.4M</span></div>"
-        "<div><span class='k'>VOCAB</span><span class='v'>73 REMI</span></div>"
+        f"<div><span class='k'>ENGINE</span><span class='v'>decoder · {param_str}</span></div>"
+        f"<div><span class='k'>VOCAB</span><span class='v'>{tokenizer.vocab_size} REMI</span></div>"
         "<div><span class='k'>GRID</span><span class='v'>16th · 4/4</span></div>"
         f"<div><span class='k'>DEVICE</span><span class='v'>{device}</span></div>"
         "</div></div>",
@@ -308,13 +278,16 @@ def render_seed_editor():
         else:
             upload = st.file_uploader("MIDI seed", type=["mid", "midi"], key="midi_upload")
             if upload is not None:
-                tmp_path = Path("out/_uploaded_seed.mid")
-                tmp_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp_path.write_bytes(upload.read())
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=".mid", delete=False) as tmp:
+                    tmp_path = Path(tmp.name)
                 try:
+                    tmp_path.write_bytes(upload.read())
                     seed = read_midi(tmp_path)
                 except ValueError as exc:
                     st.error(str(exc))
+                finally:
+                    tmp_path.unlink(missing_ok=True)
             else:
                 st.markdown("<div class='mono'>— awaiting file.</div>", unsafe_allow_html=True)
         # Invalid input clears the monitor; takes stay visible (ledger flags stale).
@@ -323,35 +296,37 @@ def render_seed_editor():
 
 
 def render_control_deck():
-    """CTL module. Returns (mode, bars, k, temperature, top_p, tempo, go)."""
+    """CTL module. Returns (mode, bars, k, temperature, top_p, rep_penalty, tempo, go)."""
     with st.container():
         st.markdown('<div class="mod-label">CTL // GENERATION</div>', unsafe_allow_html=True)
         mode = st.radio("Mode", ["continuation", "variation"],
                         format_func=lambda m: "CONT — extend" if m == "continuation" else "VAR — re-imagine",
                         key="ctl_mode")
-        bars = st.slider("Bars", 1, 8, 4)
-        k = st.slider("Takes", 1, 8, 4)
+        bars = st.slider("Bars", 1, 8, 4, key="ctl_bars")
+        k = st.slider("Takes", 1, 8, 4, key="ctl_k")
         # Per-mode key: otherwise Streamlit keeps the old mode's value and the
         # variation default (1.15) never applies after switching modes.
         temperature = st.slider("Temp", 0.5, 1.5,
-                                0.95 if mode == "continuation" else 1.15, 0.05,
+                                0.95 if mode == "continuation" else 1.05, 0.05,
                                 key=f"temp_{mode}")
         top_p = st.slider("Top-p", 0.5, 1.0, 0.95, 0.01, key="top_p")
+        rep_penalty = st.slider("Repetition Penalty", 1.0, 2.0, 1.15, 0.05, key="ctl_rep_penalty")
         tempo = st.slider("BPM", 60, 160, 100, 5, key="bpm")
         go = st.button("RUN  ●", type="primary", use_container_width=True)
         st.button("SHUFFLE SEED + DIALS", type="secondary", use_container_width=True,
                   on_click=_shuffle_dials)
         st.markdown(f"<div class='mono'>ckpt · {CHECKPOINT_PATH}</div>", unsafe_allow_html=True)
-    return mode, bars, k, temperature, top_p, tempo, go
+    return mode, bars, k, temperature, top_p, rep_penalty, tempo, go
 
 
-def run_generation(model, tokenizer, device, seed, sig, mode, bars, k, temperature, top_p):
+def run_generation(model, tokenizer, device, seed, sig, mode, bars, k, temperature, top_p, rep_penalty=1.15):
     try:
         with st.spinner("Sampling takes…"):
             fn = generate_continuations if mode == "continuation" else generate_variations
             st.session_state.mm_candidates = fn(
                 model, tokenizer, seed, n_bars=bars, k=k,
-                temperature=float(temperature), top_p=float(top_p), device=device)
+                temperature=float(temperature), top_p=float(top_p),
+                repetition_penalty=float(rep_penalty), device=device)
             st.session_state.mm_sig = sig
             st.session_state.mm_mode = mode
     except Exception as exc:  # never blank-crash the console
@@ -376,11 +351,11 @@ def take_card(i, cand, tempo, mm_mode):
         plt.close(fig)
         a_col, s_col = st.columns([1.7, 1])
         with a_col:
-            st.audio(melody_to_wav_bytes(cand.melody, tempo_bpm=tempo), format="audio/wav")
-            midi_path = Path("out") / f"{mm_mode}_{i + 1}.mid"
-            write_midi(cand.melody, midi_path, tempo_bpm=tempo)
-            st.download_button("SAVE .MID", data=midi_path.read_bytes(),
-                               file_name=midi_path.name, mime="audio/midi",
+            triples = tuple((n.onset, n.pitch, n.dur) for n in cand.melody)
+            st.audio(get_cached_audio(triples, tempo=tempo), format="audio/wav")
+            midi_bytes = get_cached_midi_bytes(triples, tempo=tempo)
+            st.download_button("SAVE .MID", data=midi_bytes,
+                               file_name=f"{mm_mode}_{i + 1}.mid", mime="audio/midi",
                                key=f"dl_{i}", use_container_width=True)
         with s_col:
             st.markdown("<div class='strip-lbl'>CONTOUR</div>", unsafe_allow_html=True)
@@ -430,16 +405,17 @@ def studio_view():
     with col_src:
         seed = render_seed_editor()
     with col_ctl:
-        mode, bars, k, temperature, top_p, tempo, go = render_control_deck()
+        mode, bars, k, temperature, top_p, rep_penalty, tempo, go = render_control_deck()
 
     seed = st.session_state.mm_seed
     sig = (melody_to_note_string(seed), mode, bars, k,
-           round(float(temperature), 3), round(float(top_p), 3)) if seed is not None else None
+           round(float(temperature), 3), round(float(top_p), 3),
+           round(float(rep_penalty), 3)) if seed is not None else None
     if go:
         if seed is None:
             st.warning("Nothing to run — load a valid seed in SRC first.")
         elif run_generation(model, tokenizer, device, seed, sig, mode, bars, k,
-                            temperature, top_p):
+                            temperature, top_p, rep_penalty):
             st.switch_page(takes_pg)
 
 
@@ -457,7 +433,9 @@ def takes_view():
             st.page_link(studio_pg, label="→ OPEN CONSOLE")
         return
     seed = st.session_state.mm_seed
-    mode, bars, k = st.session_state.get("ctl_mode", "continuation"), 4, len(candidates)
+    mode = st.session_state.get("ctl_mode", "continuation")
+    bars = st.session_state.get("ctl_bars", 4)
+    k = len(candidates)
     sig = st.session_state.mm_sig
     stale = sig is None or (seed is not None and sig[0] != melody_to_note_string(seed))
     badge = ("<span class='stale'>STALE — seed changed, press RUN on Console</span>" if stale

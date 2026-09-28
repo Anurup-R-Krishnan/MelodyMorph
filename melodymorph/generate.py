@@ -49,33 +49,43 @@ def generate_continuations(
     temperature: float = 0.95,
     top_k: int = 0,
     top_p: float = 0.95,
+    repetition_penalty: float = 1.15,
     device: str | None = None,
     max_attempts: int | None = None,
 ) -> list[Candidate]:
-    """Extend ``seed`` forward by ``n_bars`` bars, ``k`` distinct times."""
+    """Extend ``seed`` forward by ``n_bars`` bars, collecting ``k`` distinct candidates."""
     device = device or str(next(model.parameters()).device)
     seed_len = melody_duration(seed)
     prompt = tokenizer.encode(seed, add_special=True)[:-1]  # drop EOS, keep BOS
     target_steps = seed_len + n_bars * STEPS_PER_BAR
-    max_new = int((target_steps - seed_len) * 1.5) + 24  # generous slack for BAR/markers
+    max_new = int((target_steps - seed_len) * 1.5) + 32  # slack for BAR/markers
 
-    attempts = max_attempts or k * 3
-    candidates: list[Candidate] = []
+    attempts = max_attempts or k * 5
+    unique: list[Candidate] = []
+    seen: set[tuple[int, ...]] = set()
+
     for _ in range(attempts):
-        if len(candidates) >= k:
+        if len(unique) >= k:
             break
         ids = generate(
             model, tokenizer, prompt,
             max_new_tokens=max_new, temperature=temperature,
-            top_k=top_k, top_p=top_p, device=device,
+            top_k=top_k, top_p=top_p, repetition_penalty=repetition_penalty,
+            device=device,
         )
         melody = tokenizer.decode(ids)
         melody = [n for n in melody if n.onset < target_steps]
         if melody_duration(melody) <= seed_len:
             continue  # model produced nothing new; skip
-        candidates.append(Candidate(melody=melody, seed_len_steps=seed_len))
 
-    return _dedupe(candidates)[:k] or candidates[:k]
+        gen_region = region_within(melody, seed_len, 10**9)
+        key = tuple(n.pitch for n in gen_region)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(Candidate(melody=melody, seed_len_steps=seed_len))
+
+    return unique[:k]
 
 
 def generate_variations(
@@ -84,53 +94,80 @@ def generate_variations(
     seed: Melody,
     n_bars: int = 4,
     k: int = 4,
-    temperature: float = 1.15,
+    temperature: float = 1.05,
     top_k: int = 0,
-    top_p: float = 0.97,
+    top_p: float = 0.96,
+    repetition_penalty: float = 1.15,
     device: str | None = None,
-    similarity_band: tuple[float, float] = (0.35, 0.9),
-    max_attempts: int = 24,
+    similarity_band: tuple[float, float] = (0.30, 0.85),
+    max_attempts: int = 32,
 ) -> list[Candidate]:
-    """Regenerate the seed's own first bar (at higher temperature) then continue,
-    keeping only candidates whose opening bar's interval contour is close-but-not-
-    identical to the seed's -- the motif should be recognisable, not copy-pasted.
+    """Generate variations that explore melodic re-imaginings related to ``seed``.
+
+    Instead of discarding the seed, the model is conditioned on the motif's harmonic
+    and melodic anchor (first 2-3 notes or half the motif), and full-length interval
+    contour similarity is evaluated against the complete seed so genuine thematic
+    relationship is preserved.
     """
     device = device or str(next(model.parameters()).device)
     seed_len = melody_duration(seed)
-    first_bar_seed = region_within(seed, 0, STEPS_PER_BAR)
-    # prompt the model with only the very first note, so it must regenerate the
-    # rest of the motif itself rather than parroting the given seed back
-    anchor = tokenizer.encode(seed[:1], add_special=True)[:-1] if seed else [tokenizer.bos_id]
+    # Use the thematic opening anchor (half the seed or up to 3 notes) rather than a single note
+    anchor_notes = seed[:max(2, len(seed) // 2)] if len(seed) >= 2 else seed
+    anchor = tokenizer.encode(anchor_notes, add_special=True)[:-1] if anchor_notes else [tokenizer.bos_id]
 
     target_steps = seed_len + n_bars * STEPS_PER_BAR
-    max_new = int(target_steps * 1.5) + 24
+    max_new = int(target_steps * 1.5) + 32
     lo, hi = similarity_band
 
-    scored: list[Candidate] = []
+    unique: list[Candidate] = []
+    seen: set[tuple[int, ...]] = set()
+
     for _ in range(max_attempts):
-        if len(scored) >= k:
+        if len(unique) >= k:
             break
         ids = generate(
             model, tokenizer, anchor,
             max_new_tokens=max_new, temperature=temperature,
-            top_k=top_k, top_p=top_p, device=device,
+            top_k=top_k, top_p=top_p, repetition_penalty=repetition_penalty,
+            device=device,
         )
         melody = tokenizer.decode(ids)
         melody = [n for n in melody if n.onset < target_steps]
-        if melody_duration(melody) < STEPS_PER_BAR:
+        if melody_duration(melody) < max(STEPS_PER_BAR, seed_len // 2):
             continue
 
-        first_bar_gen = region_within(melody, 0, STEPS_PER_BAR)
-        score = motif_similarity(first_bar_seed, first_bar_gen)
+        # Evaluate similarity over the entire seed length, not just bar 1
+        gen_head = region_within(melody, 0, max(seed_len, STEPS_PER_BAR))
+        score = motif_similarity(seed, gen_head)
+
+        key = tuple(n.pitch for n in melody)
+        if key in seen:
+            continue
+
         if lo <= score <= hi:
-            scored.append(Candidate(melody=melody, seed_len_steps=seed_len, motif_score=score))
+            seen.add(key)
+            unique.append(Candidate(melody=melody, seed_len_steps=0, motif_score=score))
 
-    if not scored:
-        # relax the band rather than returning nothing
-        scored = generate_variations(
-            model, tokenizer, seed, n_bars=n_bars, k=k,
-            temperature=temperature, top_k=top_k, top_p=top_p, device=device,
-            similarity_band=(0.0, 1.0), max_attempts=max_attempts,
-        ) if similarity_band != (0.0, 1.0) else scored
+    if len(unique) < k:
+        # If strict band yielded fewer than k, backfill with closest candidates
+        for _ in range(max_attempts // 2):
+            if len(unique) >= k:
+                break
+            ids = generate(
+                model, tokenizer, anchor,
+                max_new_tokens=max_new, temperature=temperature,
+                top_k=top_k, top_p=top_p, repetition_penalty=repetition_penalty,
+                device=device,
+            )
+            melody = tokenizer.decode(ids)
+            melody = [n for n in melody if n.onset < target_steps]
+            if not melody:
+                continue
+            key = tuple(n.pitch for n in melody)
+            if key not in seen:
+                seen.add(key)
+                gen_head = region_within(melody, 0, max(seed_len, STEPS_PER_BAR))
+    target_score = (lo + hi) / 2.0
+    unique.sort(key=lambda c: abs((c.motif_score if c.motif_score is not None else 0.5) - target_score))
+    return unique[:k]
 
-    return _dedupe(scored)[:k] or scored[:k]

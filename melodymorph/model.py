@@ -114,8 +114,8 @@ class MelodyTransformer(nn.Module):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def num_parameters(self) -> int:
-        # the tied head shares storage with tok_emb, so count it once
-        return sum(p.numel() for p in self.parameters()) - self.head.weight.numel()
+        # nn.Module.parameters() already deduplicates tied tensors via internal memo set.
+        return sum(p.numel() for p in self.parameters())
 
     def forward(
         self, idx: torch.Tensor, targets: torch.Tensor | None = None
@@ -143,5 +143,12 @@ class MelodyTransformer(nn.Module):
     def next_token_logits(self, idx: torch.Tensor) -> torch.Tensor:
         """Logits for the position after the (right-cropped) context."""
         idx = idx[:, -self.cfg.block_size:]
-        logits, _ = self(idx)
-        return logits[:, -1, :]
+        B, T = idx.shape
+        pos = torch.arange(T, device=idx.device)
+        x = self.drop(self.tok_emb(idx) + self.pos_emb(pos))
+        for block in self.blocks:
+            x = block(x)
+        # Project only the final position through the unembedding head
+        last_hidden = self.ln_f(x[:, -1:, :])
+        logits = self.head(last_hidden)
+        return logits[:, 0, :]

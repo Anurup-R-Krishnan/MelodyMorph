@@ -50,3 +50,34 @@ def test_normalize_shifts_to_zero_and_trims_overlap():
     normed = normalize(melody)
     assert normed[0].onset == 0
     assert normed[0].dur == 4  # trimmed to not overlap the next note
+
+
+def test_bar_zero_collision_prevention():
+    tok = MelodyTokenizer()
+    # Sequence with note before first BAR, followed by BAR, then second note
+    tokens = [tok.pos_token(4), tok.pitch_token(60), tok.dur_token(4),
+              tok.bar_id,
+              tok.pos_token(4), tok.pitch_token(64), tok.dur_token(4)]
+    melody = tok.decode(tokens)
+    assert len(melody) == 2
+    # Note 1 is at bar 0 step 4; Note 2 is at bar 1 step 4 (onset 20). They must NOT collide!
+    assert melody[0].onset == 4
+    assert melody[1].onset == 20
+
+
+def test_normalize_chords_preserves_highest_voice():
+    # Three simultaneous notes at onset 8
+    notes = [Note(8, 55, 4), Note(8, 67, 4), Note(8, 60, 4)]
+    normed = normalize(notes)
+    assert len(normed) == 1
+    assert normed[0].pitch == 67  # highest pitch wins
+
+
+def test_fast_o1_lookup_consistency():
+    tok = MelodyTokenizer()
+    for p in range(MIN_PITCH, MAX_PITCH + 1):
+        token_id = tok.pitch_token(p)
+        assert tok.pitch_of(token_id) == p
+    for d in range(1, 17):
+        token_id = tok.dur_token(d)
+        assert tok.dur_of(token_id) == d

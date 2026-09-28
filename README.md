@@ -48,18 +48,20 @@ This installs PyTorch (CUDA build, if you have an NVIDIA GPU), `music21`,
 # 1. Build the training corpus (cached to data/melodies.jsonl, run once)
 uv run melodymorph prepare-data
 
-# 2. Train (a few minutes on a GPU; configs/smoke.yaml for a fast sanity check)
+# 2. Train (configs/smoke.yaml for a fast sanity check; supports --resume)
 uv run melodymorph train --config configs/base.yaml
+# Resume interrupted or extended training from checkpoint:
+uv run melodymorph train --config configs/base.yaml --resume checkpoints/best.pt
 
 # 3. Generate continuations or variations from a seed
 uv run melodymorph generate --seed-preset "Ode to Joy (opening)" \
-    --mode continuation -k 4 --bars 4 --out out/
+    --mode continuation -k 4 --bars 4 --repetition-penalty 1.15 --out out/
 
 uv run melodymorph generate --seed-text "C4/q E4/q G4/h A4/e G4/e" \
-    --mode variation -k 4 --out out/
+    --mode variation -k 4 --repetition-penalty 1.15 --out out/
 
-# 4. Evaluate: perplexity + comparison against an n-gram Markov baseline
-uv run melodymorph evaluate --checkpoint checkpoints/best.pt
+# 4. Evaluate: token + pitch-level perplexity, Markov baselines, and quality metrics
+uv run melodymorph evaluate --checkpoint checkpoints/best.pt --sample-generations
 ```
 
 Each `generate` call writes `<mode>_<i>.mid` and `<mode>_<i>.png` (piano roll,

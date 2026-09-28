@@ -52,11 +52,27 @@ def test_causality_future_tokens_do_not_affect_earlier_logits():
     assert torch.allclose(logits_a[:, :-1], logits_b[:, :-1], atol=1e-5)
 
 
+import pytest
+
+
 def test_exceeding_block_size_raises():
     model, cfg = _small_model()
     x = torch.randint(0, cfg.vocab_size, (1, cfg.block_size + 1))
-    try:
+    with pytest.raises(ValueError, match="exceeds block size"):
         model(x)
-        assert False, "expected a ValueError"
-    except ValueError:
-        pass
+
+
+def test_num_parameters_accurate():
+    model, _ = _small_model()
+    # Unique parameter count should match sum of unique module parameters
+    expected = sum(p.numel() for p in model.parameters())
+    assert model.num_parameters() == expected
+
+
+def test_next_token_logits_matches_full_forward():
+    model, cfg = _small_model()
+    model.eval()
+    x = torch.randint(0, cfg.vocab_size, (2, 10))
+    full_logits, _ = model(x)
+    fast_logits = model.next_token_logits(x)
+    assert torch.allclose(fast_logits, full_logits[:, -1, :], atol=1e-5)

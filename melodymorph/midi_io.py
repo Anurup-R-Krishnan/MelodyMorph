@@ -38,6 +38,7 @@ _DUR_CODES = {
     "q.": 6,   # dotted quarter
     "e.": 3,   # dotted eighth
 }
+_DUR_TO_CODE = {v: k for k, v in _DUR_CODES.items()}
 
 _PITCH_CLASSES = {"c": 0, "d": 2, "e": 4, "f": 5, "g": 7, "a": 9, "b": 11}
 
@@ -52,6 +53,15 @@ PRESET_SEEDS: dict[str, str] = {
 }
 
 
+def _dur_to_code(steps: int) -> str:
+    """Best-effort duration code for a given number of 16th steps."""
+    if steps in _DUR_TO_CODE:
+        return _DUR_TO_CODE[steps]
+    # Fallback to closest standard duration
+    closest = min(_DUR_TO_CODE.keys(), key=lambda k: abs(k - steps))
+    return _DUR_TO_CODE[closest]
+
+
 # --------------------------------------------------------------------------
 # text seeds
 # --------------------------------------------------------------------------
@@ -59,8 +69,8 @@ def parse_note_string(text: str) -> Melody:
     """Parse a seed like ``"C4/q E4/q G4/h"`` into a melody.
 
     Pitch is scientific notation (C4 = MIDI 60), the optional suffix after ``/``
-    is the duration code (w/h/q/e/s, optionally dotted).  A missing duration
-    defaults to a quarter note.  ``R`` or ``rest`` inserts a rest.
+    is the duration code (w/h/q/e/s, optionally dotted). A missing duration
+    defaults to a quarter note. ``R`` or ``rest`` inserts a rest.
     """
     melody: Melody = []
     onset = 0
@@ -71,9 +81,14 @@ def parse_note_string(text: str) -> Melody:
             continue
 
         low = token.lower()
-        if low.startswith("r"):
+        if low == "r" or low.startswith("r/") or low == "rest" or low.startswith("rest/"):
             _, _, dur_code = token.partition("/")
-            onset += _DUR_CODES.get(dur_code.lower(), 4)
+            dur_str = dur_code.lower()
+            if dur_str and dur_str not in _DUR_CODES:
+                raise ValueError(
+                    f"invalid rest duration {dur_code!r} in {token!r} -- expected w/h/q/e/s optionally dotted"
+                )
+            onset += _DUR_CODES.get(dur_str, 4)
             continue
 
         match = _NOTE_RE.match(token)
@@ -103,13 +118,23 @@ def parse_note_string(text: str) -> Melody:
 
 
 def melody_to_note_string(melody: Melody) -> str:
-    """Inverse-ish of :func:`parse_note_string`, for display."""
+    """Inverse of :func:`parse_note_string`, including rests so round-tripping is lossless."""
     names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-    codes = {v: k for k, v in _DUR_CODES.items()}
-    parts = []
-    for note in sorted(melody, key=lambda n: n.onset):
+    parts: list[str] = []
+    current_step = 0
+
+    for note in sorted(melody, key=lambda n: (n.onset, n.pitch)):
+        if note.onset > current_step:
+            # Emit rest for gap
+            gap = note.onset - current_step
+            while gap > 0:
+                chunk = min(gap, 16)
+                parts.append(f"R/{_dur_to_code(chunk)}")
+                gap -= chunk
         name = names[note.pitch % 12] + str(note.pitch // 12 - 1)
-        parts.append(f"{name}/{codes.get(note.dur, 'q')}")
+        parts.append(f"{name}/{_dur_to_code(note.dur)}")
+        current_step = note.end
+
     return " ".join(parts)
 
 
@@ -118,7 +143,7 @@ def melody_to_note_string(melody: Melody) -> str:
 # --------------------------------------------------------------------------
 def write_midi(melody: Melody, path: str | Path, tempo_bpm: int = 100,
                program: int = 0) -> Path:
-    """Write a melody to a single-track MIDI file."""
+    """Write a melody to a single-track MIDI file conforming to SMF standard."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -150,41 +175,64 @@ def write_midi(melody: Melody, path: str | Path, tempo_bpm: int = 100,
             )
         )
 
+    # Required by SMF standard: terminate track explicitly
+    track.append(mido.MetaMessage("end_of_track", time=0))
+
     midi.save(str(path))
     return path
 
 
 def read_midi(path: str | Path) -> Melody:
-    """Read the first monophonic-ish line out of a MIDI file, on the 16th grid."""
+    """Read the melody track out of a MIDI file on the 16th grid, prioritizing lead voices."""
     midi = mido.MidiFile(str(path))
     tpb = midi.ticks_per_beat or TICKS_PER_BEAT
 
-    notes: Melody = []
+    candidates_tracks: list[Melody] = []
+
     for track in midi.tracks:
         abs_tick = 0
-        pending: dict[int, int] = {}
+        # Stack per pitch to handle overlapping legato and retriggers cleanly
+        pending: dict[int, list[int]] = {}
         track_notes: Melody = []
+
         for msg in track:
             abs_tick += msg.time
+            # Ignore percussion channel (channel 9 in 0-indexed, 10 in 1-indexed)
+            if getattr(msg, "channel", None) == 9:
+                continue
+
             if msg.type == "note_on" and msg.velocity > 0:
-                pending[msg.note] = abs_tick
+                pending.setdefault(msg.note, []).append(abs_tick)
             elif msg.type in ("note_off", "note_on"):
-                start = pending.pop(msg.note, None)
-                if start is None:
-                    continue
-                onset = int(round(start / tpb * STEPS_PER_BEAT))
-                dur = max(1, int(round((abs_tick - start) / tpb * STEPS_PER_BEAT)))
-                track_notes.append(Note(onset, msg.note, min(dur, MAX_DUR)))
-        if track_notes:
-            notes = track_notes
-            break  # first track that actually contains notes
+                starts = pending.get(msg.note)
+                if starts:
+                    start = starts.pop(0)
+                    onset = int(round(start / tpb * STEPS_PER_BEAT))
+                    dur = max(1, int(round((abs_tick - start) / tpb * STEPS_PER_BEAT)))
+                    track_notes.append(Note(onset, msg.note, min(dur, MAX_DUR)))
 
-    if not notes:
-        raise ValueError(f"no notes found in {path}")
+        if len(track_notes) >= 3:
+            candidates_tracks.append(track_notes)
 
-    # keep the top note at each onset so the result is strictly monophonic
+    if not candidates_tracks:
+        # Fallback to any notes found in file
+        all_notes: Melody = []
+        for track in midi.tracks:
+            abs_tick = 0
+            for msg in track:
+                abs_tick += msg.time
+                if msg.type == "note_on" and msg.velocity > 0:
+                    all_notes.append(Note(int(round(abs_tick / tpb * STEPS_PER_BEAT)), msg.note, 4))
+        if not all_notes:
+            raise ValueError(f"no playable notes found in {path}")
+        candidates_tracks.append(all_notes)
+
+    # Select the track with the highest average pitch (standard soprano/melody heuristic)
+    best_track = max(candidates_tracks, key=lambda tr: sum(n.pitch for n in tr) / len(tr))
+
+    # Keep the top note at each onset
     by_onset: dict[int, Note] = {}
-    for note in notes:
+    for note in best_track:
         best = by_onset.get(note.onset)
         if best is None or note.pitch > best.pitch:
             by_onset[note.onset] = note
@@ -200,10 +248,17 @@ def _fit_range(melody: Melody) -> Melody:
     lo = min(n.pitch for n in melody)
     hi = max(n.pitch for n in melody)
     shift = 0
-    while lo + shift < MIN_PITCH and hi + shift + 12 <= MAX_PITCH:
-        shift += 12
-    while hi + shift > MAX_PITCH and lo + shift - 12 >= MIN_PITCH:
-        shift -= 12
+    if hi - lo <= (MAX_PITCH - MIN_PITCH):
+        while lo + shift < MIN_PITCH:
+            shift += 12
+        while hi + shift > MAX_PITCH:
+            shift -= 12
+    else:
+        # Span exceeds total register; center the midpoint in the active range
+        mid = (lo + hi) / 2.0
+        target_mid = (MIN_PITCH + MAX_PITCH) / 2.0
+        shift = int(round((target_mid - mid) / 12.0)) * 12
+
     if shift:
         melody = [Note(n.onset, n.pitch + shift, n.dur) for n in melody]
     return [n for n in melody if MIN_PITCH <= n.pitch <= MAX_PITCH]

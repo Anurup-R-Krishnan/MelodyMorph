@@ -40,6 +40,11 @@ def _part_to_melody(part) -> Melody:
     """Flatten one music21 part into monophonic notes on the 16th grid."""
     from music21 import chord, note as m21note
 
+    try:
+        part = part.stripTies()
+    except Exception:
+        pass
+
     notes: Melody = []
     for element in part.flatten().notes:
         if isinstance(element, chord.Chord):
@@ -59,7 +64,7 @@ def _part_to_melody(part) -> Melody:
 
 
 def _transpose_to_c(score):
-    """Transpose a score so its tonic is C (major) or A (minor)."""
+    """Transpose a score so its tonic is C (major) or A (minor), minimizing octave leaps."""
     from music21 import interval, pitch as m21pitch
 
     try:
@@ -67,10 +72,19 @@ def _transpose_to_c(score):
     except Exception:  # analysis can fail on degenerate scores
         return score
 
-    target = "C" if key.mode == "major" else "A"
+    target = "C4" if key.mode == "major" else "A4"
     try:
-        step = interval.Interval(key.tonic, m21pitch.Pitch(target))
-        return score.transpose(step)
+        tonic = key.tonic
+        if tonic.octave is None:
+            tonic.octave = 4
+        step = interval.Interval(tonic, m21pitch.Pitch(target))
+        # Keep transposition within a tritone (-6 to +6 semitones) to avoid wild octave displacements
+        semi = step.semitones
+        while semi > 6:
+            semi -= 12
+        while semi < -6:
+            semi += 12
+        return score.transpose(interval.Interval(semi))
     except Exception:
         return score
 
@@ -87,10 +101,12 @@ def _fit_range(melody: Melody) -> Melody:
         return melody
     lo = min(n.pitch for n in melody)
     hi = max(n.pitch for n in melody)
+    if hi - lo > (MAX_PITCH - MIN_PITCH):
+        return melody  # Span exceeds range
     shift = 0
-    while lo + shift < MIN_PITCH and hi + shift + 12 <= MAX_PITCH:
+    while lo + shift < MIN_PITCH:
         shift += 12
-    while hi + shift > MAX_PITCH and lo + shift - 12 >= MIN_PITCH:
+    while hi + shift > MAX_PITCH:
         shift -= 12
     if shift == 0:
         return melody
@@ -131,7 +147,7 @@ def _iter_chorales(limit: int | None):
         soprano = None
         for part in score.parts:
             name = (part.partName or "").lower()
-            if "soprano" in name:
+            if "soprano" in name or "sopran" in name:
                 soprano = part
                 break
         if soprano is None and len(score.parts) > 0:
@@ -158,20 +174,26 @@ def build_corpus(
 
     melodies: list[Melody] = []
 
-    for score in _iter_essen(limit):
+    # Read scores until we hit the requested number of valid melodies
+    raw_limit = None if limit is None else limit * 4
+    for score in _iter_essen(raw_limit):
         melody = _fit_range(_part_to_melody(_transpose_to_c(score)))
         if _melody_ok(melody):
             melodies.append(melody)
+            if limit is not None and len(melodies) >= limit:
+                break
 
     log.info("melodies from essenFolksong: %d", len(melodies))
 
     if include_chorales and (limit is None or len(melodies) < limit):
         remaining = None if limit is None else limit - len(melodies)
         before = len(melodies)
-        for part in _iter_chorales(remaining):
+        for part in _iter_chorales(None if remaining is None else remaining * 4):
             melody = _fit_range(_part_to_melody(_transpose_to_c(part)))
             if _melody_ok(melody):
                 melodies.append(melody)
+                if limit is not None and len(melodies) >= limit:
+                    break
         log.info("melodies from Bach chorale sopranos: %d", len(melodies) - before)
 
     if not melodies:

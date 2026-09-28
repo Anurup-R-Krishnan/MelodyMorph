@@ -67,6 +67,10 @@ class MelodyTokenizer:
         self._pitch_set = set(self.pitch_ids)
         self._dur_set = set(self.dur_ids)
 
+        self._pos_map: dict[int, int] = {idx: i for i, idx in enumerate(self.pos_ids)}
+        self._pitch_map: dict[int, int] = {idx: MIN_PITCH + i for i, idx in enumerate(self.pitch_ids)}
+        self._dur_map: dict[int, int] = {idx: MIN_DUR + i for i, idx in enumerate(self.dur_ids)}
+
     # -- basics ------------------------------------------------------------
     def __len__(self) -> int:
         return len(self.itos)
@@ -92,13 +96,13 @@ class MelodyTokenizer:
         return idx in self._dur_set
 
     def pitch_of(self, idx: int) -> int:
-        return MIN_PITCH + self.pitch_ids.index(idx)
+        return self._pitch_map[idx]
 
     def dur_of(self, idx: int) -> int:
-        return MIN_DUR + self.dur_ids.index(idx)
+        return self._dur_map[idx]
 
     def pos_of(self, idx: int) -> int:
-        return self.pos_ids.index(idx)
+        return self._pos_map[idx]
 
     def pitch_token(self, pitch: int) -> int:
         return self.pitch_ids[pitch - MIN_PITCH]
@@ -114,7 +118,7 @@ class MelodyTokenizer:
         """Encode a melody to token ids.
 
         Notes are assumed sorted by onset; overlapping notes are trimmed so the
-        stream stays strictly monophonic.  Out-of-range pitches/durations are
+        stream stays strictly monophonic. Out-of-range pitches/durations are
         clamped rather than dropped, so encoding never silently loses a note.
         """
         ids: list[int] = [self.bos_id] if add_special else []
@@ -143,15 +147,21 @@ class MelodyTokenizer:
 
         Defensive by design: sampled sequences can be ill-formed, so incomplete or
         out-of-order triples are skipped instead of raising.
+        Correctly prevents bar 0 collisions when notes precede or follow the first BAR marker.
         """
         melody: Melody = []
-        bar = -1
+        bar = 0
+        seen_bar = False
         pos: int | None = None
         pitch: int | None = None
 
         for idx in ids:
             if idx == self.bar_id:
-                bar += 1
+                if seen_bar or len(melody) > 0:
+                    bar += 1
+                else:
+                    bar = 0
+                seen_bar = True
                 pos = pitch = None
             elif self.is_pos(idx):
                 pos = self.pos_of(idx)
@@ -160,7 +170,7 @@ class MelodyTokenizer:
                 pitch = self.pitch_of(idx) if pos is not None else None
             elif self.is_dur(idx):
                 if pos is not None and pitch is not None:
-                    onset = max(bar, 0) * STEPS_PER_BAR + pos
+                    onset = bar * STEPS_PER_BAR + pos
                     melody.append(Note(onset, pitch, self.dur_of(idx)))
                 pos = pitch = None
             elif idx == self.eos_id:
@@ -170,19 +180,28 @@ class MelodyTokenizer:
         return melody
 
 
-def normalize(melody: Melody) -> Melody:
-    """Shift a melody so it starts at step 0 and trim any overlaps."""
+def normalize(melody: Melody, align_bars: bool = False) -> Melody:
+    """Shift a melody so it starts at step 0 (or bar boundary if align_bars) and trim any overlaps."""
     if not melody:
         return []
-    notes = sorted(melody, key=lambda n: (n.onset, n.pitch))
-    offset = notes[0].onset
+    # If there are simultaneous notes (e.g. from chord or polyphonic MIDI), keep the highest pitch
+    by_onset: dict[int, Note] = {}
+    for n in sorted(melody, key=lambda x: (x.onset, x.pitch)):
+        by_onset[n.onset] = n  # highest pitch wins
+    notes = sorted(by_onset.values(), key=lambda n: n.onset)
+
+    if align_bars:
+        offset = (notes[0].onset // STEPS_PER_BAR) * STEPS_PER_BAR
+    else:
+        offset = notes[0].onset
+
     out: Melody = []
     for i, note in enumerate(notes):
         dur = note.dur
         if i + 1 < len(notes):
             dur = min(dur, notes[i + 1].onset - note.onset)
-        if dur >= MIN_DUR:
-            out.append(Note(note.onset - offset, note.pitch, min(dur, MAX_DUR)))
+        dur = max(MIN_DUR, min(dur, MAX_DUR))
+        out.append(Note(note.onset - offset, note.pitch, dur))
     return out
 
 
