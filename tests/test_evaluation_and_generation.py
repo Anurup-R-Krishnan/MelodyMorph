@@ -98,7 +98,7 @@ def test_train_resumption_checkpoint(tmp_path):
         checkpoint_path=ckpt_path,
         run_dir=str(tmp_path / "runs"),
     )
-    _save_checkpoint(dummy_cfg, m_cfg, model, tok, ckpt_path, optimizer=opt, epoch=1, step=10, val_loss=2.5)
+    _save_checkpoint(dummy_cfg, m_cfg, model, tok, ckpt_path, optimizer=opt, epoch=1, step=10, val_loss=2.5, best_val=2.5)
 
     assert Path(ckpt_path).exists()
     loaded_ckpt = torch.load(ckpt_path, weights_only=False)
@@ -106,6 +106,13 @@ def test_train_resumption_checkpoint(tmp_path):
     assert loaded_ckpt["step"] == 10
     assert "optimizer_state" in loaded_ckpt
     assert loaded_ckpt["val_loss"] == 2.5
+    assert loaded_ckpt["best_val_loss"] == 2.5
+
+    from melodymorph.train import load_checkpoint
+    import pytest
+    with pytest.raises(FileNotFoundError, match="not found"):
+        load_checkpoint(str(tmp_path / "non_existent.pt"))
+
 
 
 def test_generation_continuations_returns_k_unique():

@@ -52,6 +52,7 @@ class TrainConfig:
     checkpoint_path: str = "checkpoints/best.pt"
     run_dir: str = "runs"
     resume_from: str | None = None
+    device: str | None = None
 
     @classmethod
     def from_yaml(cls, path: str) -> "TrainConfig":
@@ -67,13 +68,20 @@ def _cosine_warmup_lr(step: int, total_steps: int, warmup_steps: int, base_lr: f
     return 0.5 * base_lr * (1 + math.cos(math.pi * min(progress, 1.0)))
 
 
-def _device() -> str:
-    return "cuda" if torch.cuda.is_available() else "cpu"
+def _resolve_device(requested: str | None = None) -> str:
+    if requested:
+        return requested
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 def train(cfg: TrainConfig) -> dict:
     torch.manual_seed(cfg.seed)
-    device = _device()
+    device = _resolve_device(cfg.device)
+    device_type = "cuda" if device.startswith("cuda") else "cpu"
     log.info("training on device: %s", device)
 
     try:
@@ -109,7 +117,7 @@ def train(cfg: TrainConfig) -> dict:
     log.info("model parameters: %d", model.num_parameters())
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-    amp_enabled = cfg.use_amp and device == "cuda"
+    amp_enabled = cfg.use_amp and device.startswith("cuda")
     scaler = torch.amp.GradScaler(enabled=amp_enabled)
 
     total_steps = cfg.epochs * max(len(train_loader), 1)
@@ -141,7 +149,7 @@ def train(cfg: TrainConfig) -> dict:
                 log.warning("could not load scaler state: %s", e)
         start_epoch = ckpt.get("epoch", 0)
         step = ckpt.get("step", 0)
-        best_val = ckpt.get("val_loss", float("inf"))
+        best_val = ckpt.get("best_val_loss", ckpt.get("val_loss", float("inf")))
         hist_file = run_dir / "history.json"
         if hist_file.exists():
             try:
@@ -156,63 +164,83 @@ def train(cfg: TrainConfig) -> dict:
             start_epoch, cfg.epochs,
         )
 
-    for epoch in range(start_epoch, cfg.epochs):
-        model.train()
-        epoch_loss, n_batches = 0.0, 0
-        t0 = time.time()
+    last_ckpt_path = str(run_dir / "last.pt")
 
-        for xb, yb in train_loader:
-            xb, yb = xb.to(device), yb.to(device)
-            lr = _cosine_warmup_lr(step, total_steps, warmup_steps, cfg.lr)
-            for group in optimizer.param_groups:
-                group["lr"] = lr
+    try:
+        for epoch in range(start_epoch, cfg.epochs):
+            model.train()
+            epoch_loss, n_batches = 0.0, 0
+            t0 = time.time()
 
-            optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast(device_type=device, enabled=amp_enabled):
-                _, loss = model(xb, yb)
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
+            for xb, yb in train_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                lr = _cosine_warmup_lr(step, total_steps, warmup_steps, cfg.lr)
+                for group in optimizer.param_groups:
+                    group["lr"] = lr
 
-            epoch_loss += loss.item()
-            n_batches += 1
-            step += 1
+                optimizer.zero_grad(set_to_none=True)
+                with torch.amp.autocast(device_type=device_type, enabled=amp_enabled):
+                    _, loss = model(xb, yb)
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
 
-        train_loss = epoch_loss / max(n_batches, 1)
-        val_loss = _evaluate_loss(model, val_loader, device)
-        val_ppl = math.exp(min(val_loss, 20))
+                epoch_loss += loss.item()
+                n_batches += 1
+                step += 1
 
-        history["train_loss"].append(train_loss)
-        history["val_loss"].append(val_loss)
-        history["val_perplexity"].append(val_ppl)
+            train_loss = epoch_loss / max(n_batches, 1)
+            val_loss = _evaluate_loss(model, val_loader, device, amp_enabled=amp_enabled)
+            val_ppl = math.exp(min(val_loss, 20))
 
-        log.info(
-            "epoch %d/%d  train_loss=%.4f  val_loss=%.4f  val_ppl=%.2f  (%.1fs)",
-            epoch + 1, cfg.epochs, train_loss, val_loss, val_ppl, time.time() - t0,
-        )
+            history["train_loss"].append(train_loss)
+            history["val_loss"].append(val_loss)
+            history["val_perplexity"].append(val_ppl)
 
-        if val_loss < best_val:
-            best_val = val_loss
-            _save_checkpoint(
-                cfg, model_cfg, model, tokenizer, cfg.checkpoint_path,
-                optimizer=optimizer, scaler=scaler, epoch=epoch + 1, step=step, val_loss=val_loss,
+            log.info(
+                "epoch %d/%d  train_loss=%.4f  val_loss=%.4f  val_ppl=%.2f  (%.1fs)",
+                epoch + 1, cfg.epochs, train_loss, val_loss, val_ppl, time.time() - t0,
             )
 
-    (run_dir / "history.json").write_text(json.dumps(history, indent=2))
-    _plot_loss_curve(history, run_dir / "loss_curve.png")
+            # Always save latest checkpoint for seamless resumption
+            _save_checkpoint(
+                cfg, model_cfg, model, tokenizer, last_ckpt_path,
+                optimizer=optimizer, scaler=scaler, epoch=epoch + 1, step=step,
+                val_loss=val_loss, best_val=min(best_val, val_loss),
+            )
+
+            # Save best checkpoint whenever validation loss improves
+            if val_loss < best_val:
+                best_val = val_loss
+                _save_checkpoint(
+                    cfg, model_cfg, model, tokenizer, cfg.checkpoint_path,
+                    optimizer=optimizer, scaler=scaler, epoch=epoch + 1, step=step,
+                    val_loss=val_loss, best_val=best_val,
+                )
+
+            # Update history and plot live at the end of every epoch
+            (run_dir / "history.json").write_text(json.dumps(history, indent=2))
+            _plot_loss_curve(history, run_dir / "loss_curve.png")
+
+    except KeyboardInterrupt:
+        log.warning("training interrupted by user (Ctrl+C); saving state...")
+        (run_dir / "history.json").write_text(json.dumps(history, indent=2))
+        _plot_loss_curve(history, run_dir / "loss_curve.png")
 
     return {"best_val_loss": best_val, "history": history}
 
 
-def _evaluate_loss(model: MelodyTransformer, loader: DataLoader, device: str) -> float:
+def _evaluate_loss(model: MelodyTransformer, loader: DataLoader, device: str, amp_enabled: bool = False) -> float:
     model.eval()
+    device_type = "cuda" if device.startswith("cuda") else "cpu"
     total, n = 0.0, 0
     with torch.no_grad():
         for xb, yb in loader:
             xb, yb = xb.to(device), yb.to(device)
-            _, loss = model(xb, yb)
+            with torch.amp.autocast(device_type=device_type, enabled=amp_enabled):
+                _, loss = model(xb, yb)
             total += loss.item()
             n += 1
     return total / max(n, 1)
@@ -221,7 +249,7 @@ def _evaluate_loss(model: MelodyTransformer, loader: DataLoader, device: str) ->
 def _save_checkpoint(
     cfg: TrainConfig, model_cfg: ModelConfig, model: MelodyTransformer,
     tokenizer: MelodyTokenizer, path: str, optimizer=None, scaler=None,
-    epoch: int = 0, step: int = 0, val_loss: float = 0.0,
+    epoch: int = 0, step: int = 0, val_loss: float = 0.0, best_val: float = float("inf"),
 ) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -232,6 +260,7 @@ def _save_checkpoint(
         "epoch": epoch,
         "step": step,
         "val_loss": val_loss,
+        "best_val_loss": best_val,
     }
     if optimizer is not None:
         payload["optimizer_state"] = optimizer.state_dict()
@@ -241,7 +270,12 @@ def _save_checkpoint(
 
 
 def load_checkpoint(path: str, device: str | None = None) -> tuple[MelodyTransformer, MelodyTokenizer]:
-    device = device or _device()
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(
+            f"checkpoint file {path!r} not found. Run `melodymorph train` first to produce a checkpoint."
+        )
+    device = device or _resolve_device()
     try:
         ckpt = torch.load(path, map_location=device, weights_only=True)
     except Exception:
@@ -259,13 +293,18 @@ def load_checkpoint(path: str, device: str | None = None) -> tuple[MelodyTransfo
 
 
 def _plot_loss_curve(history: dict, path: Path) -> None:
+    if not history.get("train_loss"):
+        return
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.ticker as ticker
 
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(history["train_loss"], label="train loss")
-    ax.plot(history["val_loss"], label="val loss")
+    epochs = list(range(1, len(history["train_loss"]) + 1))
+    ax.plot(epochs, history["train_loss"], label="train loss", marker="o", markersize=3)
+    ax.plot(epochs, history["val_loss"], label="val loss", marker="s", markersize=3)
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
     ax.set_xlabel("epoch")
     ax.set_ylabel("cross-entropy loss")
     ax.set_title("MelodyMorph training curve")
@@ -273,3 +312,4 @@ def _plot_loss_curve(history: dict, path: Path) -> None:
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
+

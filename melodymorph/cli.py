@@ -31,6 +31,15 @@ def _cmd_train(args: argparse.Namespace) -> None:
     cfg = TrainConfig.from_yaml(args.config)
     if getattr(args, "resume", None):
         cfg.resume_from = args.resume
+    if getattr(args, "epochs", None) is not None:
+        cfg.epochs = args.epochs
+    if getattr(args, "lr", None) is not None:
+        cfg.lr = args.lr
+    if getattr(args, "batch_size", None) is not None:
+        cfg.batch_size = args.batch_size
+    if getattr(args, "device", None) is not None:
+        cfg.device = args.device
+
     result = train(cfg)
     log.info("training complete, best val loss = %.4f", result["best_val_loss"])
 
@@ -151,6 +160,10 @@ def build_parser() -> argparse.ArgumentParser:
     tr = sub.add_parser("train", help="train the Transformer")
     tr.add_argument("--config", required=True)
     tr.add_argument("--resume", help="path to checkpoint to resume training from")
+    tr.add_argument("--epochs", type=int, help="override number of training epochs")
+    tr.add_argument("--lr", type=float, help="override learning rate")
+    tr.add_argument("--batch-size", type=int, help="override batch size")
+    tr.add_argument("--device", help="override compute device ('cuda', 'cpu', 'mps')")
     tr.set_defaults(func=_cmd_train)
 
     gen = sub.add_parser("generate", help="generate continuations/variations from a seed")

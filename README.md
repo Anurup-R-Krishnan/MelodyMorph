@@ -48,10 +48,11 @@ This installs PyTorch (CUDA build, if you have an NVIDIA GPU), `music21`,
 # 1. Build the training corpus (cached to data/melodies.jsonl, run once)
 uv run melodymorph prepare-data
 
-# 2. Train (configs/smoke.yaml for a fast sanity check; supports --resume)
+# 2. Train (configs/smoke.yaml for a fast sanity check; supports --resume, --epochs, --device)
 uv run melodymorph train --config configs/base.yaml
-# Resume interrupted or extended training from checkpoint:
-uv run melodymorph train --config configs/base.yaml --resume checkpoints/best.pt
+# Resume or extend training from a checkpoint:
+uv run melodymorph train --config configs/base.yaml --resume checkpoints/best.pt --epochs 20
+
 
 # 3. Generate continuations or variations from a seed
 uv run melodymorph generate --seed-preset "Ode to Joy (opening)" \

@@ -208,3 +208,41 @@ def normalize(melody: Melody, align_bars: bool = False) -> Melody:
 def melody_duration(melody: Melody) -> int:
     """Total length of a melody in 16th steps."""
     return max((n.end for n in melody), default=0)
+
+
+def transpose(melody: Melody, semitones: int) -> Melody:
+    return [Note(n.onset, n.pitch + semitones, n.dur) for n in melody]
+
+
+def in_range(melody: Melody) -> bool:
+    return all(MIN_PITCH <= n.pitch <= MAX_PITCH for n in melody)
+
+
+def fit_range(melody: Melody) -> Melody:
+    """Octave-shift a melody as a whole into the model's pitch range.
+
+    A melody whose span exceeds the range is centred, and the notes that still
+    fall outside are dropped.
+    """
+    if not melody:
+        return melody
+    lo = min(n.pitch for n in melody)
+    hi = max(n.pitch for n in melody)
+    shift = 0
+    if hi - lo <= MAX_PITCH - MIN_PITCH:
+        while lo + shift < MIN_PITCH:
+            shift += 12
+        while hi + shift > MAX_PITCH:
+            shift -= 12
+    else:
+        mid, target_mid = (lo + hi) / 2.0, (MIN_PITCH + MAX_PITCH) / 2.0
+        shift = int(round((target_mid - mid) / 12.0)) * 12
+    return [n for n in transpose(melody, shift) if MIN_PITCH <= n.pitch <= MAX_PITCH]
+
+
+PITCH_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+def pitch_name(pitch: int) -> str:
+    """Scientific pitch name, C4 = MIDI 60."""
+    return f"{PITCH_NAMES[pitch % 12]}{pitch // 12 - 1}"
