@@ -2,21 +2,14 @@
 
 from __future__ import annotations
 
-import matplotlib
-matplotlib.use("Agg")  # safe in headless/CLI contexts; Streamlit re-selects its own backend
-import matplotlib.pyplot as plt
+# The object-oriented Figure API, not pyplot: pyplot keeps global state, which is
+# not thread-safe when several Streamlit sessions render at once, and leaks
+# every figure a caller forgets to close.
+from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
 from .tokenizer import STEPS_PER_BAR, Melody, melody_duration
-
-_ALL_PITCH_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-
-
-def _pitch_label(pitch: int) -> str:
-    name = _ALL_PITCH_NAMES[pitch % 12]
-    octave = pitch // 12 - 1
-    # Label natural notes with name+octave, sharps with small sharp sign
-    return f"{name}{octave}"
+from .tokenizer import pitch_name as _pitch_label
 
 
 def plot_piano_roll(
@@ -25,6 +18,7 @@ def plot_piano_roll(
     title: str = "",
     theme: str = "light",
     ax=None,
+    bar: int = STEPS_PER_BAR,
 ):
     """Draw a piano roll. Notes with onset < seed_len are shaded as the seed.
 
@@ -33,7 +27,8 @@ def plot_piano_roll(
     """
     own_fig = ax is None
     if own_fig:
-        fig, ax = plt.subplots(figsize=(12, 4))
+        fig = Figure(figsize=(12, 4))
+        ax = fig.add_subplot()
     else:
         fig = ax.figure
 
@@ -57,22 +52,22 @@ def plot_piano_roll(
 
     if not melody:
         ax.set_title(title or "Empty melody", color=text_color)
-        ax.set_xlim(0, STEPS_PER_BAR)
+        ax.set_xlim(0, bar)
         ax.set_ylim(55, 75)
         return fig
 
     pitches = [n.pitch for n in melody]
     lo, hi = min(pitches) - 1, max(pitches) + 1
     total_steps = melody_duration(melody)
-    max_steps = max(total_steps + 2, STEPS_PER_BAR)
+    max_steps = max(total_steps + 2, bar)
 
     # Subtle beat lines (every 4 steps / quarter note)
     for beat_step in range(0, max_steps + 1, 4):
-        if beat_step % STEPS_PER_BAR != 0:
+        if beat_step % bar != 0:
             ax.axvline(beat_step, color=grid_color, linewidth=0.3, alpha=0.3, linestyle=":")
 
     # Measure lines (every 16 steps)
-    for bar_step in range(0, max_steps + 1, STEPS_PER_BAR):
+    for bar_step in range(0, max_steps + 1, bar):
         ax.axvline(bar_step, color=grid_color, linewidth=0.7, alpha=0.7)
 
     for note in melody:
@@ -107,16 +102,16 @@ def plot_piano_roll(
         y_ticks = [p for p in range(lo, hi + 1) if "#" not in _pitch_label(p)]
     else:
         # Octaves and fifths
-        y_ticks = [p for p in range(lo, hi + 1) if _pitch_label(p).startswith("C") or _pitch_label(p).startswith("G")]
+        y_ticks = [p for p in range(lo, hi + 1) if p % 12 in (0, 7)]
 
     ax.set_yticks(y_ticks)
     ax.set_yticklabels([_pitch_label(p) for p in y_ticks], fontsize=7)
 
     # Measure-based X-ticks (e.g. m.1, m.2, m.3)
-    bar_ticks = list(range(0, max_steps, STEPS_PER_BAR))
+    bar_ticks = list(range(0, max_steps, bar))
     ax.set_xticks(bar_ticks)
-    ax.set_xticklabels([f"m.{b // STEPS_PER_BAR + 1}" for b in bar_ticks], fontsize=8)
-    ax.set_xlabel("measure (4/4 time)")
+    ax.set_xticklabels([f"m.{b // bar + 1}" for b in bar_ticks], fontsize=8)
+    ax.set_xlabel(f"measure ({bar // 4}/4 time)")
     if title:
         ax.set_title(title, color=text_color, fontsize=11)
     if own_fig:
@@ -124,10 +119,12 @@ def plot_piano_roll(
     return fig
 
 
-def save_piano_roll(melody: Melody, path: str, seed_len: int = 0, title: str = "", theme: str = "light") -> str:
-    fig = plot_piano_roll(melody, seed_len=seed_len, title=title, theme=theme)
+def save_piano_roll(
+    melody: Melody, path: str, seed_len: int = 0, title: str = "", theme: str = "light",
+    bar: int = STEPS_PER_BAR,
+) -> str:
+    fig = plot_piano_roll(melody, seed_len=seed_len, title=title, theme=theme, bar=bar)
     fig.savefig(path, dpi=120)
-    plt.close(fig)
     return path
 
 
@@ -144,7 +141,8 @@ def plot_contour_strip(
     """
     own_fig = ax is None
     if own_fig:
-        fig, ax = plt.subplots(figsize=figsize)
+        fig = Figure(figsize=figsize)
+        ax = fig.add_subplot()
     else:
         fig = ax.figure
 
@@ -193,6 +191,5 @@ def save_contour_strip(
 ) -> str:
     fig = plot_contour_strip(melody, seed_len=seed_len, theme=theme, figsize=figsize)
     fig.savefig(path, dpi=120)
-    plt.close(fig)
     return path
 

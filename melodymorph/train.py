@@ -1,6 +1,9 @@
-"""Training loop: AdamW + cosine schedule with warmup, AMP on CUDA, best-val
-checkpointing. Everything a checkpoint needs to regenerate from (weights, model
-config, vocab) is bundled in a single .pt file.
+"""Training loop: AdamW + cosine schedule with warmup, optional AMP, best-val
+checkpointing with early stopping.
+
+``checkpoint_path`` holds the best weights for inference (model config + vocab,
+no optimizer state). ``<checkpoint>.last.pt`` holds the latest epoch with
+optimizer state, for ``--resume``.
 """
 
 from __future__ import annotations
@@ -16,8 +19,8 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
-from .corpus import build_corpus, load_corpus
-from .dataset import MelodyWindowDataset, build_token_stream, split_melodies
+from .corpus import build_corpus, load_records, split_records
+from .dataset import MelodyWindowDataset, augment
 from .model import MelodyTransformer, ModelConfig
 from .tokenizer import MelodyTokenizer
 
@@ -30,7 +33,7 @@ class TrainConfig:
     data_cache: str = "data/melodies.jsonl"
     corpus_limit: int | None = None
     val_fraction: float = 0.1
-    transpose_range: int = 5
+    transpose_range: int = 2
     block_size: int = 256
     stride: int = 128
     # model
@@ -40,11 +43,12 @@ class TrainConfig:
     dropout: float = 0.1
     # optimisation
     batch_size: int = 64
-    epochs: int = 15
+    epochs: int = 12
     lr: float = 3e-4
     weight_decay: float = 0.01
     warmup_frac: float = 0.05
     grad_clip: float = 1.0
+    patience: int | None = 3  # stop after this many epochs without val improvement
     use_amp: bool = False  # Turing GPUs (e.g. GTX 16xx) have no tensor cores;
                             # fp16 autocast is a net slowdown there, not a speedup
     # bookkeeping
@@ -55,7 +59,7 @@ class TrainConfig:
     device: str | None = None
 
     @classmethod
-    def from_yaml(cls, path: str) -> "TrainConfig":
+    def from_yaml(cls, path: str) -> TrainConfig:
         with open(path) as fh:
             raw = yaml.safe_load(fh) or {}
         return cls(**raw)
@@ -78,6 +82,11 @@ def _resolve_device(requested: str | None = None) -> str:
     return "cpu"
 
 
+def last_checkpoint_path(checkpoint_path: str) -> str:
+    p = Path(checkpoint_path)
+    return str(p.with_name(p.stem + ".last.pt"))
+
+
 def train(cfg: TrainConfig) -> dict:
     torch.manual_seed(cfg.seed)
     device = _resolve_device(cfg.device)
@@ -85,20 +94,23 @@ def train(cfg: TrainConfig) -> dict:
     log.info("training on device: %s", device)
 
     try:
-        melodies = load_corpus(cfg.data_cache)
+        records = load_records(cfg.data_cache)
     except FileNotFoundError:
-        melodies = build_corpus(cfg.data_cache, limit=cfg.corpus_limit)
+        records = build_corpus(cfg.data_cache, limit=cfg.corpus_limit)
 
     tokenizer = MelodyTokenizer()
-    train_melodies, val_melodies = split_melodies(melodies, cfg.val_fraction, cfg.seed)
+    train_recs, val_recs = split_records(records, cfg.val_fraction)
+    train_melodies = [r.notes for r in train_recs]
+    val_melodies = [r.notes for r in val_recs]
+    train_bars, val_bars = [r.bar for r in train_recs], [r.bar for r in val_recs]
+    log.info("triple-metre melodies: %d train / %d val",
+             train_bars.count(12), val_bars.count(12))
     log.info("melodies: %d train / %d val", len(train_melodies), len(val_melodies))
 
-    train_stream = build_token_stream(train_melodies, tokenizer, cfg.transpose_range)
-    val_stream = build_token_stream(val_melodies, tokenizer, transpose_range=0)
-    log.info("tokens: %d train / %d val", len(train_stream), len(val_stream))
-
-    train_ds = MelodyWindowDataset(train_stream, cfg.block_size, cfg.stride)
-    val_ds = MelodyWindowDataset(val_stream, cfg.block_size, cfg.block_size)
+    aug, aug_bars = augment(train_melodies, cfg.transpose_range, train_bars)
+    train_ds = MelodyWindowDataset(aug, tokenizer, cfg.block_size, cfg.stride, bars=aug_bars)
+    val_ds = MelodyWindowDataset(val_melodies, tokenizer, cfg.block_size, cfg.stride, bars=val_bars)
+    log.info("windows: %d train / %d val", len(train_ds), len(val_ds))
 
     effective_batch = min(cfg.batch_size, max(1, len(train_ds)))
     drop_last = len(train_ds) >= effective_batch * 2
@@ -112,11 +124,12 @@ def train(cfg: TrainConfig) -> dict:
         d_model=cfg.d_model,
         block_size=cfg.block_size,
         dropout=cfg.dropout,
+        pad_id=tokenizer.pad_id,
     )
     model = MelodyTransformer(model_cfg).to(device)
     log.info("model parameters: %d", model.num_parameters())
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    optimizer = torch.optim.AdamW(model.param_groups(cfg.weight_decay), lr=cfg.lr)
     amp_enabled = cfg.use_amp and device.startswith("cuda")
     scaler = torch.amp.GradScaler(enabled=amp_enabled)
 
@@ -132,12 +145,12 @@ def train(cfg: TrainConfig) -> dict:
 
     if cfg.resume_from:
         log.info("resuming training from checkpoint: %s", cfg.resume_from)
-        try:
-            ckpt = torch.load(cfg.resume_from, map_location=device, weights_only=True)
-        except Exception:
-            ckpt = torch.load(cfg.resume_from, map_location=device, weights_only=False)
+        ckpt = torch.load(cfg.resume_from, map_location=device, weights_only=True)
         model.load_state_dict(ckpt["model_state"])
-        if "optimizer_state" in ckpt:
+        if "optimizer_state" not in ckpt:
+            log.warning("%s has no optimizer state (resume from %s instead)",
+                        cfg.resume_from, last_checkpoint_path(cfg.checkpoint_path))
+        else:
             try:
                 optimizer.load_state_dict(ckpt["optimizer_state"])
             except Exception as e:
@@ -152,10 +165,11 @@ def train(cfg: TrainConfig) -> dict:
         best_val = ckpt.get("best_val_loss", ckpt.get("val_loss", float("inf")))
         hist_file = run_dir / "history.json"
         if hist_file.exists():
-            try:
-                history = json.loads(hist_file.read_text())
-            except Exception:
-                pass
+            # keep only the epochs this checkpoint has actually seen
+            saved = json.loads(hist_file.read_text())
+            history = {k: saved.get(k, [])[:start_epoch] for k in history}
+        if total_steps != ckpt.get("total_steps", total_steps):
+            log.warning("epoch count changed: the LR schedule is stretched from step %d on", step)
         log.info("resumed at epoch %d, step %d, best_val=%.4f", start_epoch, step, best_val)
 
     if start_epoch >= cfg.epochs:
@@ -164,7 +178,8 @@ def train(cfg: TrainConfig) -> dict:
             start_epoch, cfg.epochs,
         )
 
-    last_ckpt_path = str(run_dir / "last.pt")
+    last_ckpt_path = last_checkpoint_path(cfg.checkpoint_path)
+    stale_epochs = 0
 
     try:
         for epoch in range(start_epoch, cfg.epochs):
@@ -208,21 +223,22 @@ def train(cfg: TrainConfig) -> dict:
             _save_checkpoint(
                 cfg, model_cfg, model, tokenizer, last_ckpt_path,
                 optimizer=optimizer, scaler=scaler, epoch=epoch + 1, step=step,
-                val_loss=val_loss, best_val=min(best_val, val_loss),
+                val_loss=val_loss, best_val=min(best_val, val_loss), total_steps=total_steps,
             )
-
-            # Save best checkpoint whenever validation loss improves
             if val_loss < best_val:
-                best_val = val_loss
+                best_val, stale_epochs = val_loss, 0
                 _save_checkpoint(
                     cfg, model_cfg, model, tokenizer, cfg.checkpoint_path,
-                    optimizer=optimizer, scaler=scaler, epoch=epoch + 1, step=step,
-                    val_loss=val_loss, best_val=best_val,
+                    epoch=epoch + 1, step=step, val_loss=val_loss, best_val=best_val,
                 )
+            else:
+                stale_epochs += 1
 
-            # Update history and plot live at the end of every epoch
             (run_dir / "history.json").write_text(json.dumps(history, indent=2))
             _plot_loss_curve(history, run_dir / "loss_curve.png")
+            if cfg.patience is not None and stale_epochs >= cfg.patience:
+                log.info("early stop: no val improvement for %d epochs", stale_epochs)
+                break
 
     except KeyboardInterrupt:
         log.warning("training interrupted by user (Ctrl+C); saving state...")
@@ -232,7 +248,9 @@ def train(cfg: TrainConfig) -> dict:
     return {"best_val_loss": best_val, "history": history}
 
 
-def _evaluate_loss(model: MelodyTransformer, loader: DataLoader, device: str, amp_enabled: bool = False) -> float:
+def _evaluate_loss(
+    model: MelodyTransformer, loader: DataLoader, device: str, amp_enabled: bool = False,
+) -> float:
     model.eval()
     device_type = "cuda" if device.startswith("cuda") else "cpu"
     total, n = 0.0, 0
@@ -241,8 +259,10 @@ def _evaluate_loss(model: MelodyTransformer, loader: DataLoader, device: str, am
             xb, yb = xb.to(device), yb.to(device)
             with torch.amp.autocast(device_type=device_type, enabled=amp_enabled):
                 _, loss = model(xb, yb)
-            total += loss.item()
-            n += 1
+            # weight by scored tokens, not batches (padding and partial batches vary)
+            n_tok = int((yb != model.cfg.pad_id).sum())
+            total += loss.item() * n_tok
+            n += n_tok
     return total / max(n, 1)
 
 
@@ -250,6 +270,7 @@ def _save_checkpoint(
     cfg: TrainConfig, model_cfg: ModelConfig, model: MelodyTransformer,
     tokenizer: MelodyTokenizer, path: str, optimizer=None, scaler=None,
     epoch: int = 0, step: int = 0, val_loss: float = 0.0, best_val: float = float("inf"),
+    total_steps: int | None = None,
 ) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -261,12 +282,17 @@ def _save_checkpoint(
         "step": step,
         "val_loss": val_loss,
         "best_val_loss": best_val,
+        "total_steps": total_steps,
     }
     if optimizer is not None:
         payload["optimizer_state"] = optimizer.state_dict()
     if scaler is not None and scaler.is_enabled():
         payload["scaler_state"] = scaler.state_dict()
     torch.save(payload, path)
+
+
+def load_checkpoint_payload(path: str) -> dict:
+    return torch.load(path, map_location="cpu", weights_only=True)
 
 
 def load_checkpoint(path: str, device: str | None = None) -> tuple[MelodyTransformer, MelodyTokenizer]:
@@ -276,12 +302,10 @@ def load_checkpoint(path: str, device: str | None = None) -> tuple[MelodyTransfo
             f"checkpoint file {path!r} not found. Run `melodymorph train` first to produce a checkpoint."
         )
     device = device or _resolve_device()
-    try:
-        ckpt = torch.load(path, map_location=device, weights_only=True)
-    except Exception:
-        ckpt = torch.load(path, map_location=device, weights_only=False)
+    ckpt = torch.load(path, map_location=device, weights_only=True)
 
-    tokenizer = MelodyTokenizer()
+    # checkpoints from before the time-signature tokens use the 73-token prefix
+    tokenizer = MelodyTokenizer(meter_tokens=len(ckpt["vocab"]) > len(MelodyTokenizer(False)))
     if tokenizer.itos != ckpt["vocab"]:
         raise ValueError("checkpoint vocabulary does not match the current tokenizer")
 
@@ -295,12 +319,11 @@ def load_checkpoint(path: str, device: str | None = None) -> tuple[MelodyTransfo
 def _plot_loss_curve(history: dict, path: Path) -> None:
     if not history.get("train_loss"):
         return
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
     import matplotlib.ticker as ticker
+    from matplotlib.figure import Figure
 
-    fig, ax = plt.subplots(figsize=(7, 4))
+    fig = Figure(figsize=(7, 4))
+    ax = fig.add_subplot()
     epochs = list(range(1, len(history["train_loss"]) + 1))
     ax.plot(epochs, history["train_loss"], label="train loss", marker="o", markersize=3)
     ax.plot(epochs, history["val_loss"], label="val loss", marker="s", markersize=3)
@@ -311,5 +334,4 @@ def _plot_loss_curve(history: dict, path: Path) -> None:
     ax.legend()
     fig.tight_layout()
     fig.savefig(path, dpi=120)
-    plt.close(fig)
 

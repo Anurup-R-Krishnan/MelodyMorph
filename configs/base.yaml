@@ -1,5 +1,5 @@
-# Full training run. Tuned for a GTX 1650 (no tensor cores -- AMP is disabled,
-# see melodymorph/train.py); ~15-20 min total on that GPU.
+# Full training run. ~4 min on a T4 with --amp; ~15 min on a GTX 1650 (no tensor
+# cores, so leave AMP off there).
 data_cache: data/melodies.jsonl
 corpus_limit: null
 val_fraction: 0.1
@@ -13,7 +13,8 @@ d_model: 256
 dropout: 0.1
 
 batch_size: 64
-epochs: 10
+epochs: 12
+patience: 3
 lr: 0.0003
 weight_decay: 0.01
 warmup_frac: 0.05

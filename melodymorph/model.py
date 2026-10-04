@@ -22,9 +22,18 @@ class ModelConfig:
     d_model: int = 256
     block_size: int = 256
     dropout: float = 0.1
+    pad_id: int = 0  # targets equal to this are ignored by the loss
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+class KVCache:
+    """Per-layer keys and values of the positions seen so far."""
+
+    def __init__(self) -> None:
+        self.k: torch.Tensor | None = None
+        self.v: torch.Tensor | None = None
 
 
 class CausalSelfAttention(nn.Module):
@@ -42,7 +51,9 @@ class CausalSelfAttention(nn.Module):
         self.attn_dropout = cfg.dropout
         self.resid_dropout = nn.Dropout(cfg.dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cache: KVCache | None = None) -> torch.Tensor:
+        """``cache`` (inference only): keys/values of earlier positions for this
+        layer; the new ones are appended to it in place."""
         B, T, C = x.shape
         q, k, v = self.qkv(x).split(C, dim=2)
         # (B, n_head, T, d_head)
@@ -50,10 +61,24 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, self.d_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, self.d_head).transpose(1, 2)
 
+        past = 0
+        if cache is not None:
+            past = cache.k.size(2) if cache.k is not None else 0
+            if past:
+                k = torch.cat([cache.k, k], dim=2)
+                v = torch.cat([cache.v, v], dim=2)
+            cache.k, cache.v = k, v
+
+        if past == 0:
+            mask, causal = None, True
+        else:
+            # queries sit at positions past..past+T-1 and may see every key up to themselves
+            q_pos = torch.arange(past, past + T, device=x.device)[:, None]
+            mask, causal = torch.arange(past + T, device=x.device)[None, :] <= q_pos, False
         y = F.scaled_dot_product_attention(
-            q, k, v,
+            q, k, v, attn_mask=mask,
             dropout_p=self.attn_dropout if self.training else 0.0,
-            is_causal=True,
+            is_causal=causal,
         )
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_dropout(self.proj(y))
@@ -80,8 +105,8 @@ class Block(nn.Module):
         self.ln2 = nn.LayerNorm(cfg.d_model)
         self.mlp = MLP(cfg)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x))
+    def forward(self, x: torch.Tensor, cache: KVCache | None = None) -> torch.Tensor:
+        x = x + self.attn(self.ln1(x), cache)
         x = x + self.mlp(self.ln2(x))
         return x
 
@@ -135,9 +160,39 @@ class MelodyTransformer(nn.Module):
             loss = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)),
                 targets.reshape(-1),
-                ignore_index=0,  # PAD
+                ignore_index=self.cfg.pad_id,
             )
         return logits, loss
+
+    def param_groups(self, weight_decay: float) -> list[dict]:
+        """AdamW groups: decay matrices only, never biases, LayerNorms or embeddings."""
+        decay, no_decay = [], []
+        for name, p in self.named_parameters():
+            is_matrix = p.dim() >= 2 and not name.startswith(("tok_emb", "pos_emb", "head"))
+            (decay if is_matrix else no_decay).append(p)
+        return [{"params": decay, "weight_decay": weight_decay},
+                {"params": no_decay, "weight_decay": 0.0}]
+
+    def new_cache(self) -> list[KVCache]:
+        return [KVCache() for _ in self.blocks]
+
+    @torch.no_grad()
+    def step(self, idx: torch.Tensor, cache: list[KVCache]) -> torch.Tensor:
+        """Incremental decoding: feed the next token(s) ``idx`` (B, T) after the
+        positions already in ``cache`` and return the last position's logits.
+
+        The caller must restart with a fresh cache (and a cropped context) once
+        the total length would exceed ``block_size``.
+        """
+        past = cache[0].k.size(2) if cache[0].k is not None else 0
+        T = idx.size(1)
+        if past + T > self.cfg.block_size:
+            raise ValueError("cached context exceeds block size")
+        pos = torch.arange(past, past + T, device=idx.device)
+        x = self.drop(self.tok_emb(idx) + self.pos_emb(pos))
+        for block, layer_cache in zip(self.blocks, cache):
+            x = block(x, layer_cache)
+        return self.head(self.ln_f(x[:, -1, :]))
 
     @torch.no_grad()
     def next_token_logits(self, idx: torch.Tensor) -> torch.Tensor:

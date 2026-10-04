@@ -7,22 +7,26 @@ through a full score library.
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
 import mido
 
+from .corpus import METRES
 from .tokenizer import (
     MAX_DUR,
     MAX_PITCH,
     MIN_PITCH,
-    STEPS_PER_BAR,
     STEPS_PER_BEAT,
     Melody,
     Note,
-    melody_duration,
+    fit_range,
     normalize,
+    pitch_name,
 )
+
+log = logging.getLogger(__name__)
 
 TICKS_PER_BEAT = 480
 TICKS_PER_STEP = TICKS_PER_BEAT // STEPS_PER_BEAT  # 120
@@ -42,7 +46,7 @@ _DUR_TO_CODE = {v: k for k, v in _DUR_CODES.items()}
 
 _PITCH_CLASSES = {"c": 0, "d": 2, "e": 4, "f": 5, "g": 7, "a": 9, "b": 11}
 
-_NOTE_RE = re.compile(r"^([A-Ga-g])([#b]?)(-?\d)(?:/([whqes]\.?))?$")
+_NOTE_RE = re.compile(r"^([A-Ga-g])([#b]?)(-?\d)(?:/([whqes]\.?|\d+))?$")
 
 PRESET_SEEDS: dict[str, str] = {
     "Ode to Joy (opening)": "E4/q E4/q F4/q G4/q G4/q F4/q E4/q D4/q",
@@ -54,12 +58,26 @@ PRESET_SEEDS: dict[str, str] = {
 
 
 def _dur_to_code(steps: int) -> str:
-    """Best-effort duration code for a given number of 16th steps."""
-    if steps in _DUR_TO_CODE:
-        return _DUR_TO_CODE[steps]
-    # Fallback to closest standard duration
-    closest = min(_DUR_TO_CODE.keys(), key=lambda k: abs(k - steps))
-    return _DUR_TO_CODE[closest]
+    """Duration code for a number of 16th steps: a letter when one exists, else
+    the bare step count (e.g. ``5``), so every duration round-trips exactly."""
+    return _DUR_TO_CODE.get(steps, str(steps))
+
+
+def _code_to_dur(code: str | None, token: str) -> int:
+    if not code:
+        return 4
+    code = code.lower()
+    if code.isdigit():
+        steps = int(code)
+        if not 1 <= steps <= MAX_DUR:
+            raise ValueError(f"duration {code} in {token!r} must be 1-{MAX_DUR} sixteenths")
+        return steps
+    if code not in _DUR_CODES:
+        raise ValueError(
+            f"invalid duration {code!r} in {token!r} -- expected w/h/q/e/s (optionally dotted) "
+            "or a number of sixteenths"
+        )
+    return _DUR_CODES[code]
 
 
 # --------------------------------------------------------------------------
@@ -83,12 +101,7 @@ def parse_note_string(text: str) -> Melody:
         low = token.lower()
         if low == "r" or low.startswith("r/") or low == "rest" or low.startswith("rest/"):
             _, _, dur_code = token.partition("/")
-            dur_str = dur_code.lower()
-            if dur_str and dur_str not in _DUR_CODES:
-                raise ValueError(
-                    f"invalid rest duration {dur_code!r} in {token!r} -- expected w/h/q/e/s optionally dotted"
-                )
-            onset += _DUR_CODES.get(dur_str, 4)
+            onset += _code_to_dur(dur_code, token)
             continue
 
         match = _NOTE_RE.match(token)
@@ -108,7 +121,7 @@ def parse_note_string(text: str) -> Melody:
                 f"{MIN_PITCH}-{MAX_PITCH} (C3-C6)"
             )
 
-        dur = _DUR_CODES.get((dur_code or "q").lower(), 4)
+        dur = _code_to_dur(dur_code, token)
         melody.append(Note(onset, pitch, min(dur, MAX_DUR)))
         onset += dur
 
@@ -119,7 +132,6 @@ def parse_note_string(text: str) -> Melody:
 
 def melody_to_note_string(melody: Melody) -> str:
     """Inverse of :func:`parse_note_string`, including rests so round-tripping is lossless."""
-    names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
     parts: list[str] = []
     current_step = 0
 
@@ -131,8 +143,7 @@ def melody_to_note_string(melody: Melody) -> str:
                 chunk = min(gap, 16)
                 parts.append(f"R/{_dur_to_code(chunk)}")
                 gap -= chunk
-        name = names[note.pitch % 12] + str(note.pitch // 12 - 1)
-        parts.append(f"{name}/{_dur_to_code(note.dur)}")
+        parts.append(f"{pitch_name(note.pitch)}/{_dur_to_code(note.dur)}")
         current_step = note.end
 
     return " ".join(parts)
@@ -142,8 +153,8 @@ def melody_to_note_string(melody: Melody) -> str:
 # MIDI
 # --------------------------------------------------------------------------
 def write_midi(melody: Melody, path: str | Path, tempo_bpm: int = 100,
-               program: int = 0) -> Path:
-    """Write a melody to a single-track MIDI file conforming to SMF standard."""
+               program: int = 0, bar: int = 16) -> Path:
+    """Write a melody to a single-track MIDI file (4/4, or 3/4 for 12-step bars)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -151,7 +162,7 @@ def write_midi(melody: Melody, path: str | Path, tempo_bpm: int = 100,
     track = mido.MidiTrack()
     midi.tracks.append(track)
     track.append(mido.MetaMessage("set_tempo", tempo=mido.bpm2tempo(tempo_bpm)))
-    track.append(mido.MetaMessage("time_signature", numerator=4, denominator=4))
+    track.append(mido.MetaMessage("time_signature", numerator=bar // 4, denominator=4))
     track.append(mido.Message("program_change", program=program, time=0))
 
     # build absolute-time events, then convert to delta times
@@ -182,8 +193,36 @@ def write_midi(melody: Melody, path: str | Path, tempo_bpm: int = 100,
     return path
 
 
+def midi_time_signature(path: str | Path) -> str | None:
+    """The first time signature in a MIDI file (``"3/4"``), or None if it has none."""
+    for track in mido.MidiFile(str(path)).tracks:
+        for msg in track:
+            if msg.type == "time_signature":
+                return f"{msg.numerator}/{msg.denominator}"
+    return None
+
+
+def midi_bar(time_signature: str | None) -> int | None:
+    """Model bar length for a MIDI file's metre (no signature = 4/4; None = unsupported).
+
+    Only metres that need no rescaling (4/4, 3/4, 6/8, ...) are accepted: MIDI
+    ticks are read at face value, one quarter note = 4 steps.
+    """
+    scale, bar = METRES.get(time_signature or "4/4", (None, None))
+    return bar if scale == 1.0 else None
+
+
 def read_midi(path: str | Path) -> Melody:
-    """Read the melody track out of a MIDI file on the 16th grid, prioritizing lead voices."""
+    """Read the melody track out of a MIDI file on the 16th grid, prioritizing lead voices.
+
+    Bars follow the file's time signature (see :func:`midi_bar`). A file in an
+    unsupported metre (5/4, 7/8, 3/2, ...) is still read, as 4/4, with a warning.
+    """
+    ts = midi_time_signature(path)
+    bar = midi_bar(ts)
+    if bar is None:
+        log.warning("%s is in %s, which the model does not support; reading it as 4/4", path, ts)
+        bar = 16
     midi = mido.MidiFile(str(path))
     tpb = midi.ticks_per_beat or TICKS_PER_BEAT
 
@@ -237,32 +276,6 @@ def read_midi(path: str | Path) -> Melody:
         if best is None or note.pitch > best.pitch:
             by_onset[note.onset] = note
 
-    melody = normalize(sorted(by_onset.values(), key=lambda n: n.onset))
-    return _fit_range(melody)
-
-
-def _fit_range(melody: Melody) -> Melody:
-    """Octave-shift the melody as a whole into the supported pitch range."""
-    if not melody:
-        return melody
-    lo = min(n.pitch for n in melody)
-    hi = max(n.pitch for n in melody)
-    shift = 0
-    if hi - lo <= (MAX_PITCH - MIN_PITCH):
-        while lo + shift < MIN_PITCH:
-            shift += 12
-        while hi + shift > MAX_PITCH:
-            shift -= 12
-    else:
-        # Span exceeds total register; center the midpoint in the active range
-        mid = (lo + hi) / 2.0
-        target_mid = (MIN_PITCH + MAX_PITCH) / 2.0
-        shift = int(round((target_mid - mid) / 12.0)) * 12
-
-    if shift:
-        melody = [Note(n.onset, n.pitch + shift, n.dur) for n in melody]
-    return [n for n in melody if MIN_PITCH <= n.pitch <= MAX_PITCH]
-
-
-def bars_of(melody: Melody) -> float:
-    return melody_duration(melody) / STEPS_PER_BAR
+    # align_bars: MIDI time 0 is a barline, so a pickup keeps its metric position
+    melody = normalize(sorted(by_onset.values(), key=lambda n: n.onset), align_bars=True, bar=bar)
+    return fit_range(melody)

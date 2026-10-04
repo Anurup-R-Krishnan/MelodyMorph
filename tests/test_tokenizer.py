@@ -5,8 +5,27 @@ from melodymorph.tokenizer import MAX_PITCH, MIN_PITCH, MelodyTokenizer, Note, n
 
 def test_vocab_size_matches_families():
     tok = MelodyTokenizer()
-    # PAD BOS EOS BAR + 16 POS + 37 PITCH + 16 DUR
-    assert tok.vocab_size == 4 + 16 + 37 + 16
+    # PAD BOS EOS BAR + 16 POS + 37 PITCH + 16 DUR + 2 TS
+    assert tok.vocab_size == 4 + 16 + 37 + 16 + 2
+    # the legacy vocabulary is an exact prefix, so old checkpoints keep their token ids
+    legacy = MelodyTokenizer(meter_tokens=False)
+    assert tok.itos[: legacy.vocab_size] == legacy.itos
+
+
+def test_triple_bars_roundtrip_with_time_signature_token():
+    tok = MelodyTokenizer()
+    melody = [Note(8, 60, 4), Note(12, 64, 4), Note(24, 67, 12)]
+    ids = tok.encode(melody, bar=12)
+    assert ids[1] == tok.ts_ids[12]
+    assert ids.count(tok.bar_id) == 3
+    assert tok.decode(ids) == melody             # the TS token tells decode the bar length
+    assert tok.decode(tok.encode(melody)) == melody
+
+
+def test_legacy_tokenizer_refuses_triple_bars():
+    import pytest
+    with pytest.raises(ValueError, match="bar length"):
+        MelodyTokenizer(meter_tokens=False).encode([Note(0, 60, 4)], bar=12)
 
 
 def test_roundtrip_simple_melody():
