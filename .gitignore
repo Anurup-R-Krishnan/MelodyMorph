@@ -4,7 +4,10 @@ __pycache__/
 data/*.jsonl
 checkpoints/*.pt
 !checkpoints/best.pt
-runs/smoke/
+runs/*/
+reports/
+logs/
+*.log
 out/
 .pytest_cache/
 .claude/scheduled_tasks.lock
