@@ -1,10 +1,28 @@
 #!/usr/bin/env bash
 # Metre-alignment ablation + regularisation variants on one GPU (two runs at a time).
-set -u
+#
+# Prerequisites, both produced outside this script:
+#   python -m scripts.ablation_data          builds the three corpora in data/
+#   the baseline "aligned" run               checkpoints/aligned.pt
+set -uo pipefail
 cd "$(dirname "$0")/.."
 PY=.venv/bin/python
 mkdir -p logs reports
-until grep -q "^aligned" data_prep.log 2>/dev/null; do sleep 10; done
+
+# Fail fast with a usable message. The previous version waited on data_prep.log,
+# a file nothing in the repo creates, so a fresh run blocked forever.
+missing=0
+for corpus in data/melodies.jsonl data/melodies_legacy.jsonl data/melodies_legacy_duple.jsonl; do
+  if [[ ! -s $corpus ]]; then
+    echo "missing $corpus -- run: $PY -m scripts.ablation_data" >&2
+    missing=1
+  fi
+done
+if [[ ! -s checkpoints/aligned.pt ]]; then
+  echo "missing checkpoints/aligned.pt -- train the baseline 'aligned' run first" >&2
+  missing=1
+fi
+(( missing == 0 )) || exit 1
 
 run() {  # name, extra --set args...
   local name=$1; shift
