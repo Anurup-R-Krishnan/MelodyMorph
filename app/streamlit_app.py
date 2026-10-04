@@ -15,19 +15,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
-import matplotlib.pyplot as plt
 
 from melodymorph.audio import melody_to_wav_bytes
 from melodymorph.evaluate import log_human_rating
-from melodymorph.generate import generate_continuations, generate_variations
+from melodymorph.generate import MAX_SEED_NOTES, generate_continuations, generate_variations
 from melodymorph.midi_io import (
     PRESET_SEEDS,
     melody_to_note_string,
+    midi_bar,
+    midi_time_signature,
     parse_note_string,
     read_midi,
     write_midi,
 )
-from melodymorph.tokenizer import melody_duration
+from melodymorph.tokenizer import melody_duration, pitch_name
 from melodymorph.train import load_checkpoint
 from melodymorph.viz import contour_strip, plot_piano_roll
 
@@ -35,11 +36,6 @@ st.set_page_config(page_title="MelodyMorph MM-01", page_icon="🎛", layout="wid
 
 CHECKPOINT_PATH = os.environ.get("MELODYMORPH_CHECKPOINT", "checkpoints/best.pt")
 DEFAULT_PRESET = "Ode to Joy (opening)"
-_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-
-
-def pitch_name(p: int) -> str:
-    return f"{_NAMES[p % 12]}{p // 12 - 1}"
 
 
 @st.cache_resource
@@ -55,22 +51,23 @@ def get_cached_audio(melody_triples: tuple, tempo: int) -> bytes:
 
 
 @st.cache_data
-def get_cached_midi_bytes(melody_triples: tuple, tempo: int) -> bytes:
+def get_cached_midi_bytes(melody_triples: tuple, tempo: int, bar: int = 16) -> bytes:
     import tempfile
+
     from melodymorph.tokenizer import Note
     melody = [Note(*t) for t in melody_triples]
     with tempfile.NamedTemporaryFile(suffix=".mid", delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:
-        write_midi(melody, tmp_path, tempo_bpm=tempo)
+        write_midi(melody, tmp_path, tempo_bpm=tempo, bar=bar)
         return tmp_path.read_bytes()
     finally:
         tmp_path.unlink(missing_ok=True)
 
 
-def dark_roll(melody, seed_len=0):
+def dark_roll(melody, seed_len=0, bar=16):
     """Native dark theme render of piano roll."""
-    return plot_piano_roll(melody, seed_len=seed_len, title="", theme="dark")
+    return plot_piano_roll(melody, seed_len=seed_len, title="", theme="dark", bar=bar)
 
 
 THEME_CSS = """
@@ -200,6 +197,8 @@ st.markdown('<div class="grain"></div>', unsafe_allow_html=True)
 st.session_state.setdefault("mm_candidates", [])
 st.session_state.setdefault("mm_mode", "continuation")
 st.session_state.setdefault("mm_sig", None)
+st.session_state.setdefault("mm_bar", 16)  # bar length of the seed: 16 = duple, 12 = triple
+st.session_state.setdefault("mm_metre", "4/4")  # the seed's signature, for the GRID readout
 if "mm_seed" not in st.session_state:
     st.session_state.mm_seed = parse_note_string(PRESET_SEEDS[DEFAULT_PRESET])
 
@@ -238,17 +237,35 @@ def topbar():
         st.page_link(spec_pg, label="03 / SPEC")
 
 
+def _metre_label() -> str:
+    """The seed's time signature, for the GRID readout.
+
+    The metre radio's own widget state (``seed_meter``) is filled in before the
+    rerun, so on the console it is already correct for the click being handled,
+    whereas ``mm_metre`` is only written further down the script and would lag by
+    one interaction. The radio is not rendered for a MIDI seed, and Streamlit
+    drops widget state for widgets a page does not instantiate, so on the other
+    pages ``seed_meter`` is gone -- fall back to the stored ``mm_metre`` there.
+    """
+    if st.session_state.get("src_choice") != "MIDI":
+        live = st.session_state.get("seed_meter")
+        if live:
+            return live
+    return st.session_state.get("mm_metre", "4/4")
+
+
 def masthead(title: str, sub: str, hint: str):
     model, tokenizer = get_model(CHECKPOINT_PATH)
     device = str(next(model.parameters()).device)
     params = model.num_parameters()
     param_str = f"{params / 1e6:.1f}M" if params >= 1e6 else f"{params / 1e3:.0f}K"
+    metre_label = _metre_label()
     st.markdown(
         f"<div class='mast'><div><h1>{title}</h1><p>{hint}</p></div>"
         "<div class='readout'>"
         f"<div><span class='k'>ENGINE</span><span class='v'>decoder · {param_str}</span></div>"
         f"<div><span class='k'>VOCAB</span><span class='v'>{tokenizer.vocab_size} REMI</span></div>"
-        "<div><span class='k'>GRID</span><span class='v'>16th · 4/4</span></div>"
+        f"<div><span class='k'>GRID</span><span class='v'>16th · {metre_label}</span></div>"
         f"<div><span class='k'>DEVICE</span><span class='v'>{device}</span></div>"
         "</div></div>",
         unsafe_allow_html=True,
@@ -261,6 +278,11 @@ def render_seed_editor():
         st.markdown('<div class="mod-label amber">SRC // SEED INPUT</div>', unsafe_allow_html=True)
         source = st.radio("Input", ["Preset", "Text", "MIDI"], horizontal=True, key="src_choice")
         seed = None
+        bar, metre = 16, "4/4"
+        if source != "MIDI":
+            metre = st.radio("Metre", ["4/4", "3/4"], horizontal=True, key="seed_meter",
+                             help="MIDI seeds take their metre from the file")
+            bar = 16 if metre == "4/4" else 12
         if source == "Preset":
             name = st.selectbox("Motif", list(PRESET_SEEDS), key="preset_name")
             st.code(PRESET_SEEDS[name])
@@ -284,14 +306,25 @@ def render_seed_editor():
                 try:
                     tmp_path.write_bytes(upload.read())
                     seed = read_midi(tmp_path)
+                    ts = midi_time_signature(tmp_path)
+                    bar = midi_bar(ts) or 16
+                    metre = ts if midi_bar(ts) else "4/4"
+                    if midi_bar(ts) is None:
+                        st.warning(f"This file is in {ts}, which the model does not support "
+                                   "(it knows 2/4, 4/4, 3/4, 6/8); reading it as 4/4.")
                 except ValueError as exc:
                     st.error(str(exc))
                 finally:
                     tmp_path.unlink(missing_ok=True)
             else:
                 st.markdown("<div class='mono'>— awaiting file.</div>", unsafe_allow_html=True)
+        if seed is not None and len(seed) > MAX_SEED_NOTES:
+            st.info(f"Seed has {len(seed)} notes; generation uses {MAX_SEED_NOTES} of them "
+                    "(the last ones for CONT, the first ones for VAR).")
         # Invalid input clears the monitor; takes stay visible (ledger flags stale).
         st.session_state.mm_seed = seed
+        st.session_state.mm_bar = bar
+        st.session_state.mm_metre = metre
     return seed
 
 
@@ -302,7 +335,8 @@ def render_control_deck():
         mode = st.radio("Mode", ["continuation", "variation"],
                         format_func=lambda m: "CONT — extend" if m == "continuation" else "VAR — re-imagine",
                         key="ctl_mode")
-        bars = st.slider("Bars", 1, 8, 4, key="ctl_bars")
+        bars = st.slider("Bars", 1, 8, 4, key="ctl_bars",
+                         help="continuation only; a variation keeps the seed's length and rhythm")
         k = st.slider("Takes", 1, 8, 4, key="ctl_k")
         # Per-mode key: otherwise Streamlit keeps the old mode's value and the
         # variation default (1.15) never applies after switching modes.
@@ -310,23 +344,27 @@ def render_control_deck():
                                 0.95 if mode == "continuation" else 1.05, 0.05,
                                 key=f"temp_{mode}")
         top_p = st.slider("Top-p", 0.5, 1.0, 0.95, 0.01, key="top_p")
-        rep_penalty = st.slider("Repetition Penalty", 1.0, 2.0, 1.15, 0.05, key="ctl_rep_penalty")
+        rep_penalty = st.slider("Pitch repetition penalty", 1.0, 2.0, 1.0, 0.05, key="ctl_rep_penalty",
+                                help="continuation only; 1.0 = off")
         tempo = st.slider("BPM", 60, 160, 100, 5, key="bpm")
-        go = st.button("RUN  ●", type="primary", use_container_width=True)
-        st.button("SHUFFLE SEED + DIALS", type="secondary", use_container_width=True,
+        go = st.button("RUN  ●", type="primary", width="stretch")
+        st.button("SHUFFLE SEED + DIALS", type="secondary", width="stretch",
                   on_click=_shuffle_dials)
         st.markdown(f"<div class='mono'>ckpt · {CHECKPOINT_PATH}</div>", unsafe_allow_html=True)
     return mode, bars, k, temperature, top_p, rep_penalty, tempo, go
 
 
-def run_generation(model, tokenizer, device, seed, sig, mode, bars, k, temperature, top_p, rep_penalty=1.15):
+def run_generation(model, tokenizer, seed, sig, mode, bars, k, temperature, top_p, rep_penalty=1.0):
     try:
         with st.spinner("Sampling takes…"):
-            fn = generate_continuations if mode == "continuation" else generate_variations
-            st.session_state.mm_candidates = fn(
-                model, tokenizer, seed, n_bars=bars, k=k,
-                temperature=float(temperature), top_p=float(top_p),
-                repetition_penalty=float(rep_penalty), device=device)
+            common = dict(k=k, temperature=float(temperature), top_p=float(top_p),
+                          bar=st.session_state.mm_bar)
+            if mode == "continuation":
+                st.session_state.mm_candidates = generate_continuations(
+                    model, tokenizer, seed, n_bars=bars,
+                    repetition_penalty=float(rep_penalty), **common)
+            else:
+                st.session_state.mm_candidates = generate_variations(model, tokenizer, seed, **common)
             st.session_state.mm_sig = sig
             st.session_state.mm_mode = mode
     except Exception as exc:  # never blank-crash the console
@@ -346,34 +384,37 @@ def take_card(i, cand, tempo, mm_mode):
             f"{melody_duration(cand.melody)} steps · {pitch_name(lo)}–{pitch_name(hi)}</span></div>",
             unsafe_allow_html=True,
         )
-        fig = dark_roll(cand.melody, seed_len=cand.seed_len_steps)
-        st.pyplot(fig, use_container_width=True)
-        plt.close(fig)
+        fig = dark_roll(cand.melody, seed_len=cand.seed_len_steps, bar=cand.bar)
+        st.pyplot(fig, width="stretch")
         a_col, s_col = st.columns([1.7, 1])
         with a_col:
             triples = tuple((n.onset, n.pitch, n.dur) for n in cand.melody)
             st.audio(get_cached_audio(triples, tempo=tempo), format="audio/wav")
-            midi_bytes = get_cached_midi_bytes(triples, tempo=tempo)
+            midi_bytes = get_cached_midi_bytes(triples, tempo=tempo, bar=cand.bar)
             st.download_button("SAVE .MID", data=midi_bytes,
                                file_name=f"{mm_mode}_{i + 1}.mid", mime="audio/midi",
-                               key=f"dl_{i}", use_container_width=True)
+                               key=f"dl_{i}", width="stretch")
         with s_col:
             st.markdown("<div class='strip-lbl'>CONTOUR</div>", unsafe_allow_html=True)
             sfig = contour_strip(cand.melody, seed_len=cand.seed_len_steps)
-            st.pyplot(sfig, use_container_width=True)
-            plt.close(sfig)
+            st.pyplot(sfig, width="stretch")
             with st.expander("RATE TAKE"):
                 mus = st.slider("Musicality", 1, 5, 3, key=f"mus_{i}")
                 mot = st.slider("Motif lock", 1, 5, 3, key=f"mot_{i}")
-                if st.button("LOG RATING", key=f"rate_{i}", use_container_width=True):
-                    log_human_rating("out/ratings.csv", f"{mm_mode}_{i + 1}", mus, mot)
+                if st.button("LOG RATING", key=f"rate_{i}", width="stretch"):
+                    sig = st.session_state.mm_sig or ("",)
+                    log_human_rating("out/ratings.csv", {
+                        "checkpoint": CHECKPOINT_PATH, "mode": mm_mode, "take": i + 1,
+                        "seed": sig[0], "melody": melody_to_note_string(cand.melody),
+                        "params": repr(sig[1:]), "musicality_1_5": mus,
+                        "motif_preservation_1_5": mot,
+                    })
                     st.toast(f"Take {i + 1}: {mus}/5 musicality, {mot}/5 motif — logged.")
 
 
 def studio_view():
     topbar()
     model, tokenizer = get_model(CHECKPOINT_PATH)
-    device = str(next(model.parameters()).device)
     masthead("MelodyMorph <span>MM-01 · console</span>", "",
              "SEED 5–15 NOTES → k SAMPLED TAKES · GRAMMAR-MASKED · MOTIF-FILTERED")
 
@@ -383,9 +424,8 @@ def studio_view():
         seed = st.session_state.mm_seed
         tempo = st.session_state.get("bpm", 100)
         if seed is not None:
-            fig = dark_roll(seed, seed_len=melody_duration(seed) + 1)
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
+            fig = dark_roll(seed, seed_len=melody_duration(seed) + 1, bar=st.session_state.mm_bar)
+            st.pyplot(fig, width="stretch")
             v1, v2 = st.columns([1.6, 1])
             with v1:
                 st.audio(melody_to_wav_bytes(seed, tempo_bpm=tempo), format="audio/wav")
@@ -408,13 +448,13 @@ def studio_view():
         mode, bars, k, temperature, top_p, rep_penalty, tempo, go = render_control_deck()
 
     seed = st.session_state.mm_seed
-    sig = (melody_to_note_string(seed), mode, bars, k,
+    sig = (melody_to_note_string(seed), st.session_state.mm_bar, mode, bars, k,
            round(float(temperature), 3), round(float(top_p), 3),
            round(float(rep_penalty), 3)) if seed is not None else None
     if go:
         if seed is None:
             st.warning("Nothing to run — load a valid seed in SRC first.")
-        elif run_generation(model, tokenizer, device, seed, sig, mode, bars, k,
+        elif run_generation(model, tokenizer, seed, sig, mode, bars, k,
                             temperature, top_p, rep_penalty):
             st.switch_page(takes_pg)
 
@@ -433,11 +473,9 @@ def takes_view():
             st.page_link(studio_pg, label="→ OPEN CONSOLE")
         return
     seed = st.session_state.mm_seed
-    mode = st.session_state.get("ctl_mode", "continuation")
-    bars = st.session_state.get("ctl_bars", 4)
-    k = len(candidates)
     sig = st.session_state.mm_sig
-    stale = sig is None or (seed is not None and sig[0] != melody_to_note_string(seed))
+    stale = sig is None or (
+        seed is not None and sig[:2] != (melody_to_note_string(seed), st.session_state.mm_bar))
     badge = ("<span class='stale'>STALE — seed changed, press RUN on Console</span>" if stale
              else "<span class='fresh'>FRESH</span>")
     st.markdown(
@@ -445,7 +483,7 @@ def takes_view():
         unsafe_allow_html=True,
     )
     Path("out").mkdir(exist_ok=True)
-    mm_mode = "variation" if any(c.motif_score is not None for c in candidates) else "continuation"
+    mm_mode = st.session_state.mm_mode
     for i, cand in enumerate(candidates):
         take_card(i, cand, tempo, mm_mode)
 
@@ -456,9 +494,9 @@ def spec_view():
     with st.container():
         st.markdown(
             """<table class="spec">
-<tr><td>01 · Tokenizer</td><td>REMI — BAR / POS / PITCH / DUR on a 16th grid. Essen folksongs + Bach soprano lines, transposed to a common key.</td></tr>
+<tr><td>01 · Tokenizer</td><td>REMI — TS / BAR / POS / PITCH / DUR on a 16th grid, aligned to real barlines (pickups kept), 4/4- or 3/4-length bars. Essen folksongs + Bach soprano lines in 2/4, 4/4, 3/4, 6/8 (and rescaled 4/2, 3/2, 6/4), transposed to C major / A minor.</td></tr>
 <tr><td>02 · Model</td><td>Causal decoder-only transformer, ~3–4M params, trained from scratch on windowed melodies with transposition augmentation.</td></tr>
-<tr><td>03 · Sampling</td><td>Temperature / top-p under a grammar mask — invalid sequences are impossible. Variation mode regenerates bar one hot and keeps the close-but-not-identical band.</td></tr>
+<tr><td>03 · Sampling</td><td>Seed moved to the training key, then temperature / top-p under a grammar mask (no overlapping notes, stops on the target bar). Variation keeps the seed's rhythm, resamples every pitch with the seed as context, and keeps the close-but-not-identical contour band.</td></tr>
 </table>""",
             unsafe_allow_html=True,
         )
