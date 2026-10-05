@@ -11,3 +11,4 @@ logs/
 out/
 .pytest_cache/
 .claude/scheduled_tasks.lock
+.impeccable/review/

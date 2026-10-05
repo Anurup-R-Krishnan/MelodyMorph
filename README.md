@@ -87,11 +87,27 @@ uv run melodymorph evaluate --generation --report reports/eval.json
 uv run streamlit run app/streamlit_app.py
 ```
 
-You can enter a seed as a preset, as text notation, or as a MIDI upload. Text
-and preset seeds have a 4/4 or 3/4 switch; a MIDI seed takes its metre from the
-file. Pick a mode and sampling settings to get piano rolls, in-browser audio and MIDI
-downloads. Ratings go to `out/ratings.csv` along with the seed, the output, the
-sampling settings and the checkpoint.
+The interface is a concert poster that is also an instrument, in three pages:
+
+- **Console**: enter a seed as a preset, as text notation, or as a MIDI upload.
+  Text and preset seeds have a 4/4 or 3/4 switch; a MIDI seed takes its metre
+  from the file. Your seed is drawn as an *arc poster* and a piano roll, and
+  the ticker under it shows the tokens the model reads. Pick a mode and the
+  sampling dials, then press *generate*.
+- **Takes**: every take gets its own arc poster, a playable piano roll, an
+  interval-contour fingerprint, a `.mid` download, its token stream, and 1-5
+  ratings that go to `out/ratings.csv` with the seed, the output, the sampling
+  settings and the checkpoint. A *fresh* or *stale* stamp tells you whether the
+  takes still match the seed.
+- **Spec**: how the tokenizer and model work, with the measured held-out
+  numbers from `runs/eval_summary.json`.
+
+On the arc poster, each note is a fragment of a ring: the ring is its pitch
+(low inside, high outside), the angle is when it starts, the length is how long
+it lasts, and the colour tells your seed (paper) from what the model wrote
+(ink). On the roll, press play, click anywhere to seek, and use *show
+construction grid* to reveal the 16th-step grid the model quantises to. All
+motion respects `prefers-reduced-motion`.
 
 ### Text seed notation
 
@@ -161,10 +177,13 @@ melodymorph/
 ├── generate.py    # continuation / variation modes
 ├── evaluate.py    # per-family NLL, Kneser-Ney baseline, generation metrics, ratings
 ├── midi_io.py     # MIDI read/write, text-seed parsing
-├── viz.py         # piano roll + contour strip (matplotlib Figure API)
+├── viz.py         # piano roll + contour strip for the CLI (matplotlib Figure API)
+├── artwork.py     # arc poster, logo, DOM piano roll and contour for the web UI
 ├── audio.py       # numpy synth -> WAV
 └── cli.py         # `melodymorph` entry point
-app/streamlit_app.py   # web UI
+app/
+├── streamlit_app.py   # the three pages
+└── static/            # theme.css (the design system), player.js, logo, self-hosted Archivo
 configs/               # base.yaml (full run), smoke.yaml (fast check)
 scripts/               # ablation and comparison scripts (scripts/legacy = pre-audit code)
 ```
