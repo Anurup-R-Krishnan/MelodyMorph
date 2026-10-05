@@ -1,0 +1,3 @@
+Archivo (variable) by Omnibus-Type, SIL Open Font License 1.1.
+Source: https://fonts.google.com/specimen/Archivo  (self-hosted woff2 subsets: latin, latin-ext)
+License: https://openfontlicense.org

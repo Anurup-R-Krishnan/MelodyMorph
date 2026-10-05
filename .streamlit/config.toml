@@ -1,7 +1,18 @@
 [theme]
-base = "dark"
-primaryColor = "#7EE8B8"
-backgroundColor = "#080808"
-secondaryBackgroundColor = "#0C0C0E"
-textColor = "#E8E8EA"
-font = "sans serif"
+base = "light"
+primaryColor = "#12100E"
+backgroundColor = "#F2512B"
+secondaryBackgroundColor = "#F5F4EF"
+textColor = "#12100E"
+font = "Archivo"
+baseRadius = "none"
+borderColor = "#12100E"
+showWidgetBorder = true
+
+[[theme.fontFaces]]
+family = "Archivo"
+url = "app/static/fonts/archivo-latin.woff2"
+weight = "100 900"
+
+[server]
+enableStaticServing = true

@@ -1,0 +1,33 @@
+{
+  "source": "melodymorph evaluate --checkpoint checkpoints/best.pt --generation (48 held-out seeds x 4 candidates)",
+  "n_train": 6658,
+  "n_val": 786,
+  "transformer": {
+    "pitch_ppl": 3.874080910839751,
+    "note_nll": 1.925361250748147,
+    "all_bits_per_note": 2.9784184660705013
+  },
+  "kneser_ney": {
+    "3": {
+      "pitch_ppl": 15.201604878068839
+    },
+    "6": {
+      "pitch_ppl": 6.588750730136749
+    },
+    "9": {
+      "pitch_ppl": 6.362334200938832
+    }
+  },
+  "continuation": {
+    "completion_rate": 1.0,
+    "in_key": 0.9235990236333497,
+    "pitch_class_js": 0.03273162366348723,
+    "distinctness": 0.6982351122753839
+  },
+  "variation": {
+    "in_band_rate": 0.9895833333333334,
+    "motif_score": 0.5561342592592593,
+    "in_key": 0.9307291666666666,
+    "distinctness": 0.7541666666666668
+  }
+}
