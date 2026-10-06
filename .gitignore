@@ -12,3 +12,6 @@ out/
 .pytest_cache/
 .claude/scheduled_tasks.lock
 .impeccable/review/
+assets/soundfonts/*.sf2
+assets/soundfonts/*.sf3
+assets/soundfonts/*.part

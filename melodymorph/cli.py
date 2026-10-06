@@ -3,6 +3,7 @@
     melodymorph prepare-data
     melodymorph train --config configs/base.yaml
     melodymorph generate --seed-text "C4/q E4/q G4/h" --mode continuation -k 4 --out out/
+    melodymorph generate --seed-preset "Folk phrase" --style rock --lead Flute --tempo 120
     melodymorph evaluate --checkpoint checkpoints/best.pt
 """
 
@@ -98,6 +99,28 @@ def _cmd_generate(args: argparse.Namespace) -> None:
                         seed_len=cand.seed_len_steps, title=f"{args.mode} #{i + 1}{score}",
                         bar=bar)
         log.info("wrote %s.mid / .png", stem)
+        if args.style != "none":
+            _write_band(cand.melody, stem, args, bar)
+
+
+def _write_band(melody, stem: Path, args: argparse.Namespace, bar: int) -> None:
+    """Arrange the take into a band: a type-1 MIDI file, plus an MP3 mixdown when a
+    soundfont and FluidSynth are available."""
+    from .arrange import LEAD_INSTRUMENTS, arrange, to_midi_bytes
+    from .render import find_soundfont, render_mix
+
+    lead = {k.lower(): v for k, v in LEAD_INSTRUMENTS.items()}.get(args.lead.lower()) if args.lead else None
+    arr = arrange(melody, style=args.style, bar=bar, tempo=args.tempo, lead_program=lead)
+    band = stem.with_name(stem.name + "_band.mid")
+    band.write_bytes(to_midi_bytes(arr))
+    log.info("wrote %s  chords: %s", band, " ".join(c.name for c in arr.chords))
+    sf = find_soundfont(args.soundfont)
+    if sf is None:
+        log.info("no soundfont, so no audio: run `python -m scripts.get_soundfont`")
+        return
+    mp3 = stem.with_suffix(".mp3")
+    mp3.write_bytes(render_mix(arr, sf))
+    log.info("wrote %s", mp3)
 
 
 def _cmd_evaluate(args: argparse.Namespace) -> None:
@@ -198,6 +221,10 @@ def build_parser() -> argparse.ArgumentParser:
     gen.add_argument("--no-key-normalize", action="store_true",
                      help="don't transpose the seed into the training key")
     gen.add_argument("--tempo", type=int, default=100)
+    gen.add_argument("--style", choices=["none", "ballad", "rock", "folk", "waltz"], default="none",
+                     help="arrange each take into a band in this style (writes <take>_band.mid and an .mp3)")
+    gen.add_argument("--lead", help="lead instrument, e.g. Violin, Flute, 'Nylon guitar'")
+    gen.add_argument("--soundfont", help="General MIDI .sf2 to render with (default: assets/soundfonts/)")
     gen.add_argument("--out", default="out")
     gen.set_defaults(func=_cmd_generate)
 
