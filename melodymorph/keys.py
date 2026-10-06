@@ -21,25 +21,31 @@ def _corr(a: list[float], b: list[float]) -> float:
     return num / den if den else 0.0
 
 
-def estimate_key(melody: Melody) -> tuple[int, str]:
-    """Return ``(tonic_pitch_class, "major" | "minor")``."""
+def key_correlations(melody: Melody) -> dict[tuple[int, str], float]:
+    """Krumhansl-Schmuckler correlation of the melody with each of the 24 keys."""
     hist = [0.0] * 12
     for n in melody:
         hist[n.pitch % 12] += n.dur
-    best = (float("-inf"), 0, "major")
+    out: dict[tuple[int, str], float] = {}
     for tonic in range(12):
         rotated = hist[tonic:] + hist[:tonic]
-        for mode, profile in (("major", _MAJOR), ("minor", _MINOR)):
-            score = _corr(rotated, profile)
-            if score > best[0]:
-                best = (score, tonic, mode)
-    return best[1], best[2]
+        out[(tonic, "major")] = _corr(rotated, _MAJOR)
+        out[(tonic, "minor")] = _corr(rotated, _MINOR)
+    return out
 
 
-def shift_to_training_key(melody: Melody) -> int:
+def estimate_key(melody: Melody) -> tuple[int, str]:
+    """Return ``(tonic_pitch_class, "major" | "minor")``."""
+    scores = key_correlations(melody)
+    return max(scores, key=scores.__getitem__)
+
+
+def shift_to_training_key(melody: Melody, bar: int = 16) -> int:
     """Semitone shift that moves ``melody`` to C major / A minor and keeps it
     inside the model's pitch range (0 if no shift keeps it in range)."""
-    tonic, mode = estimate_key(melody)
+    from .harmony import infer_key_and_chords  # lazy: harmony imports this module
+
+    tonic, mode = infer_key_and_chords(melody, bar)[0]
     target = 0 if mode == "major" else 9
     base = (target - tonic) % 12
     if base > 6:

@@ -75,7 +75,7 @@ def generate_continuations(
     if bar != STEPS_PER_BAR and not tokenizer.meter_tokens:
         raise ValueError("this checkpoint only supports duple (4/4) metre")
     seed = trim_seed(seed, keep="last", bar=bar)
-    shift = shift_to_training_key(seed) if key_normalize else 0
+    shift = shift_to_training_key(seed, bar) if key_normalize else 0
     seed_t = transpose(seed, shift)
     seed_len = melody_duration(seed_t)
     stop = _bar_ceil(seed_len + n_bars * bar, bar)
@@ -120,7 +120,7 @@ def generate_variations(
     if bar != STEPS_PER_BAR and not tokenizer.meter_tokens:
         raise ValueError("this checkpoint only supports duple (4/4) metre")
     seed = trim_seed(seed, keep="first", bar=bar)
-    shift = shift_to_training_key(seed) if key_normalize else 0
+    shift = shift_to_training_key(seed, bar) if key_normalize else 0
     seed_t = transpose(seed, shift)
     offset = _bar_ceil(melody_duration(seed_t), bar)  # restate from the next bar line
     restated = [Note(n.onset + offset, n.pitch, n.dur) for n in seed_t]
