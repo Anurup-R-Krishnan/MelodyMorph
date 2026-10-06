@@ -35,10 +35,10 @@ from .tokenizer import (
 )
 
 # The palette lives here once; app/static/theme.css mirrors it as custom properties.
-FIELD = "#F2512B"   # vermilion poster ground
+FIELD = "#F2512B"  # vermilion poster ground
 INK = "#12100E"
 PAPER = "#F5F4EF"
-ULTRA = "#1F3BE8"   # playhead and grid only
+ULTRA = "#1F3BE8"  # playhead and grid only
 
 _BLACK_KEYS = {1, 3, 6, 8, 10}
 _NO_MOTION = "@media (prefers-reduced-motion:reduce){.mm-draw{animation:none;stroke-dashoffset:0}.mm-spin{animation:none}}"
@@ -135,7 +135,8 @@ def arc_poster_svg(
             ".mm-draw{stroke-dasharray:var(--l);stroke-dashoffset:var(--l);"
             "animation:draw .9s cubic-bezier(.16,1,.3,1) forwards;animation-delay:calc(var(--i)*38ms + .15s)}"
             ".mm-spin{animation:spin 160s linear infinite}"
-            "@keyframes draw{to{stroke-dashoffset:0}}@keyframes spin{to{transform:rotate(360deg)}}" + _NO_MOTION
+            "@keyframes draw{to{stroke-dashoffset:0}}@keyframes spin{to{transform:rotate(360deg)}}"
+            + _NO_MOTION
         )
     parts: list[str] = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" '
@@ -161,7 +162,8 @@ def arc_poster_svg(
     # construction: one hairline ring per C, and a radial tick per barline
     construction = [
         f'<circle class="k" cx="{cx:.1f}" cy="{cy:.1f}" r="{ring(p):.1f}"/>'
-        for p in range(lo, hi + 1) if p % 12 == 0
+        for p in range(lo, hi + 1)
+        if p % 12 == 0
     ]
     for b in range(0, total // bar + 1):
         ang = start + sweep * (b * bar) / total
@@ -182,7 +184,9 @@ def arc_poster_svg(
         r = ring(n.pitch)
         length = r * math.radians(a1 - a0)
         anim = f' style="--i:{i};--l:{length:.1f}"' if animate else ""
-        parts.append(f'<path class="a {kind}{" mm-draw" if animate else ""}" d="{_arc(cx, cy, r, a0, a1)}"{anim}/>')
+        parts.append(
+            f'<path class="a {kind}{" mm-draw" if animate else ""}" d="{_arc(cx, cy, r, a0, a1)}"{anim}/>'
+        )
     parts.append("</g>")
     parts.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r_in * 0.55:.1f}" fill="{INK}"/></svg>')
     return "".join(parts)
@@ -211,6 +215,7 @@ def roll_html(
     bar: int = STEPS_PER_BAR,
     min_steps: int | None = None,
     animate: bool = True,
+    chords: list[tuple[int, int, str]] | None = None,
 ) -> str:
     """The roll itself: pitch labels, bar numbers, a grid that CSS can reveal,
     and one element per note positioned in percent (so it scales with its card).
@@ -221,16 +226,20 @@ def roll_html(
 
     labels = "".join(
         f'<span style="top:{(hi - p) * row_pct:.3f}%;height:{row_pct:.3f}%">{pitch_name(p)}</span>'
-        for p in range(lo, hi + 1) if p % 12 == 0
+        for p in range(lo, hi + 1)
+        if p % 12 == 0
     )
     bars = "".join(
         f'<span style="left:{b * bar / steps * 100:.3f}%">{b + 1}</span>' for b in range(steps // bar)
     )
     keys = "".join(
         f'<i class="bk" style="top:{(hi - p) * row_pct:.3f}%;height:{row_pct:.3f}%"></i>'
-        for p in range(lo, hi + 1) if p % 12 in _BLACK_KEYS
+        for p in range(lo, hi + 1)
+        if p % 12 in _BLACK_KEYS
     ) + "".join(
-        f'<i class="cl" style="top:{(hi - p + 1) * row_pct:.3f}%"></i>' for p in range(lo, hi + 1) if p % 12 == 0
+        f'<i class="cl" style="top:{(hi - p + 1) * row_pct:.3f}%"></i>'
+        for p in range(lo, hi + 1)
+        if p % 12 == 0
     )
     notes = []
     for i, n in enumerate(sorted(melody, key=lambda m: (m.onset, m.pitch))):
@@ -241,13 +250,36 @@ def roll_html(
             f'top:{(hi - n.pitch) * row_pct:.3f}%;width:{n.dur / steps * 100:.3f}%;height:{row_pct:.3f}%" '
             f'data-on="{n.onset}" data-du="{n.dur}" title="{pitch_name(n.pitch)}"></i>'
         )
+    chord_row = ""
+    if chords:
+        cells = "".join(
+            f'<span style="left:{c0 / steps * 100:.3f}%;width:{cd / steps * 100:.3f}%">{escape(name)}</span>'
+            for c0, cd, name in chords
+        )
+        chord_row = f'<div class="rl-chordcorner"></div><div class="rl-chords">{cells}</div>'
     return (
-        f'<div class="rl" style="--steps:{steps};--bar:{bar};--rows:{rows}" role="img" '
-        f'aria-label="Piano roll: {escape(_describe(melody), quote=True)}">'
-        f'<div class="rl-corner"></div><div class="rl-bars">{bars}</div>'
+        f'<div class="rl{" has-chords" if chords else ""}" style="--steps:{steps};--bar:{bar};--rows:{rows}" '
+        f'role="img" aria-label="Piano roll: {escape(_describe(melody), quote=True)}">'
+        f'<div class="rl-corner"></div><div class="rl-bars">{bars}</div>{chord_row}'
         f'<div class="rl-labels">{labels}</div>'
         f'<div class="rl-grid" data-steps="{steps}">{keys}{"".join(notes)}<b class="ph"></b></div></div>'
     )
+
+
+def mixer_html(stems: list[dict]) -> str:
+    """One row per instrument: mute, solo and a volume fader. The rows are driven by
+    the delegated listener in ``app/static/player.js``; with no JS they simply sit still."""
+    rows = []
+    for st in stems:
+        key, label = escape(st["key"], quote=True), escape(st["label"])
+        vol = int(round(st.get("volume", 1.0) * 100))
+        rows.append(
+            f'<div class="mx" data-stem="{key}"><span class="mx-n">{label}</span>'
+            f'<button type="button" class="mx-m" aria-pressed="false" aria-label="Mute {label}">M</button>'
+            f'<button type="button" class="mx-s" aria-pressed="false" aria-label="Solo {label}">S</button>'
+            f'<input type="range" class="mx-v" min="0" max="100" value="{vol}" aria-label="{label} volume"></div>'
+        )
+    return f'<div class="mm-mix" role="group" aria-label="Mixer">{"".join(rows)}</div>'
 
 
 def roll_figure_html(
@@ -258,24 +290,43 @@ def roll_figure_html(
     bar: int = STEPS_PER_BAR,
     tempo: int = 100,
     audio_b64: str | None = None,
+    stems: list[dict] | None = None,
+    chords: list[tuple[int, int, str]] | None = None,
     min_steps: int | None = None,
     animate: bool = True,
 ) -> str:
     """The roll with its controls: a play button, the grid reveal and a clock.
 
-    The reveal is a pure-CSS checkbox, so it needs no rerun. Playback and the
-    moving playhead are driven by the delegated listener in ``app/static/player.js``.
+    Audio is either one WAV (``audio_b64``, the built-in synth) or a band of MP3
+    ``stems`` (dicts with ``key``, ``label``, ``b64`` and a default ``volume``),
+    which get a mixer under the roll. ``chords`` adds a chord lane above the grid.
+
+    The grid reveal is a pure-CSS checkbox, so it needs no rerun. Playback, the
+    moving playhead and the mixer are driven by ``app/static/player.js``.
     """
     sps = 60.0 / tempo / STEPS_PER_BEAT
-    audio = f'<audio preload="none" src="data:audio/wav;base64,{audio_b64}"></audio>' if audio_b64 else ""
-    play = '<button type="button" class="mm-play" aria-label="Play"><i class="ic"></i></button>' if audio_b64 else ""
+    if stems:
+        audio = "".join(
+            f'<audio preload="auto" data-stem="{escape(st["key"], quote=True)}" '
+            f'src="data:audio/mpeg;base64,{st["b64"]}"></audio>'
+            for st in stems
+        )
+    elif audio_b64:
+        audio = f'<audio preload="none" src="data:audio/wav;base64,{audio_b64}"></audio>'
+    else:
+        audio = ""
+    play = (
+        '<button type="button" class="mm-play" aria-label="Play"><i class="ic"></i></button>' if audio else ""
+    )
+    mixer = mixer_html(stems) if stems and len(stems) > 1 else ""
     return (
         f'<figure class="mm-roll" data-sps="{sps:.5f}">'
         f'<input type="checkbox" id="grid-{uid}" class="mm-gridbox">'
         f'<div class="mm-rollbar">{play}'
         f'<label for="grid-{uid}" class="mm-gridlabel"><span class="mm-switch" aria-hidden="true"></span>'
         f'show construction grid</label><span class="mm-clock">0:00</span></div>'
-        f'{roll_html(melody, seed_len=seed_len, bar=bar, min_steps=min_steps, animate=animate)}{audio}</figure>'
+        f"{roll_html(melody, seed_len=seed_len, bar=bar, min_steps=min_steps, animate=animate, chords=chords)}"
+        f"{mixer}{audio}</figure>"
     )
 
 
@@ -302,7 +353,9 @@ def contour_svg(melody: Melody, *, width: int = 320, height: int = 56) -> str:
             y = mid - hgt if s > 0 else mid
             fill = INK if s > 0 else FIELD if s < 0 else "#8A857D"
             stroke = f' stroke="{INK}" stroke-width="1.2"' if s < 0 else ""
-            out.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{hgt:.1f}" fill="{fill}"{stroke}/>')
+            out.append(
+                f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{hgt:.1f}" fill="{fill}"{stroke}/>'
+            )
     out.append("</svg>")
     return "".join(out)
 

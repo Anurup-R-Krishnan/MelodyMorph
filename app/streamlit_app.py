@@ -20,6 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
 
+from melodymorph.arrange import (
+    LEAD_INSTRUMENTS,
+    STYLES,
+    arrange,
+    chord_chart,
+    lead_only,
+    styles_for,
+    to_midi_bytes,
+)
 from melodymorph.artwork import (
     arc_poster_img,
     contour_img,
@@ -30,6 +39,7 @@ from melodymorph.artwork import (
 from melodymorph.audio import melody_to_wav_bytes
 from melodymorph.evaluate import log_human_rating
 from melodymorph.generate import MAX_SEED_NOTES, generate_continuations, generate_variations
+from melodymorph.harmony import infer_chords
 from melodymorph.midi_io import (
     PRESET_SEEDS,
     melody_to_note_string,
@@ -39,6 +49,8 @@ from melodymorph.midi_io import (
     read_midi,
     write_midi,
 )
+from melodymorph.render import available as render_available
+from melodymorph.render import find_soundfont, render_mix, render_stems
 from melodymorph.tokenizer import Note, melody_duration, pitch_name
 from melodymorph.train import load_checkpoint
 
@@ -85,6 +97,28 @@ def get_cached_midi_bytes(melody_triples: tuple, tempo: int, bar: int = 16) -> b
         tmp_path.unlink(missing_ok=True)
 
 
+@st.cache_data(show_spinner=False, max_entries=48)
+def get_band(triples: tuple, bar: int, style: str, lead: str, tempo: int, humanize: bool, sf: str) -> dict:
+    """Arrange a melody and render the band: one MP3 stem per instrument (when a
+    soundfont is available), the chord chart, a type-1 MIDI file and an MP3 mixdown.
+    ``style == "solo"`` plays just the lead, which is how a seed is auditioned."""
+    melody = [Note(*t) for t in triples]
+    program = LEAD_INSTRUMENTS[lead]
+    if style == "solo":
+        arr = lead_only(melody, program=program, bar=bar, tempo=tempo)
+    else:
+        arr = arrange(melody, style=style, bar=bar, tempo=tempo, lead_program=program, humanize=humanize)
+    out = {"chords": chord_chart(arr), "midi": to_midi_bytes(arr), "key": arr.key, "stems": [], "mp3": None}
+    if sf:
+        stems = render_stems(arr, Path(sf), bitrate=80)
+        for t in arr.tracks:
+            label = lead if t.key == "lead" else t.label.capitalize()
+            out["stems"].append({"key": t.key, "label": label, "volume": t.volume,
+                                 "b64": base64.b64encode(stems[t.key]).decode("ascii")})
+        out["mp3"] = render_mix(arr, Path(sf))
+    return out
+
+
 def _triples(melody) -> tuple:
     return tuple((n.onset, n.pitch, n.dur) for n in melody)
 
@@ -110,6 +144,9 @@ st.session_state.setdefault("mm_sig", None)
 st.session_state.setdefault("mm_bar", 16)  # bar length of the seed: 16 = duple, 12 = triple
 st.session_state.setdefault("mm_metre", "4/4")
 st.session_state.setdefault("mm_tempo", 100)  # plain state: widget keys vanish on other pages
+st.session_state.setdefault("mm_style", "ballad")
+st.session_state.setdefault("mm_lead", "Violin")
+st.session_state.setdefault("mm_human", True)
 if "mm_seed" not in st.session_state:
     st.session_state.mm_seed = parse_note_string(PRESET_SEEDS[DEFAULT_PRESET])
 
@@ -144,6 +181,45 @@ def _metre_label() -> str:
         if live:
             return live
     return st.session_state.get("mm_metre", "4/4")
+
+
+SOUNDFONT = find_soundfont()
+CAN_RENDER = render_available(SOUNDFONT)
+
+
+def _sound_state(bar: int) -> tuple[str, str, bool]:
+    """The chosen style (valid for this metre), lead instrument and human-feel flag."""
+    keys = [s.key for s in styles_for(bar)]
+    style = st.session_state.mm_style if st.session_state.mm_style in keys else keys[0]
+    return style, st.session_state.mm_lead, st.session_state.mm_human
+
+
+def band_for(melody, bar: int, tempo: int, style: str | None = None) -> dict:
+    """Cached band for ``melody`` in the current sound settings (``style="solo"`` = lead only)."""
+    s, lead, human = _sound_state(bar)
+    return get_band(_triples(melody), bar, style or s, lead, tempo, human, str(SOUNDFONT) if CAN_RENDER else "")
+
+
+def _sync_sound(src: str, dst: str) -> None:
+    st.session_state[dst] = st.session_state[src]
+
+
+def sound_picker(prefix: str, bar: int) -> None:
+    """Style and lead-instrument pickers. The Console and Takes pages each have a
+    set; both write the plain ``mm_*`` state, so the choice survives navigation."""
+    styles = {s.key: s.label for s in styles_for(bar)}
+    style, lead, _ = _sound_state(bar)
+    st.session_state[f"{prefix}_style"] = style
+    st.session_state[f"{prefix}_lead"] = lead
+    c1, c2 = st.columns(2, gap="medium")
+    with c1:
+        st.selectbox("Band style", list(styles), format_func=styles.get, key=f"{prefix}_style",
+                     on_change=_sync_sound, args=(f"{prefix}_style", "mm_style"),
+                     help="the groove under the melody: chords, bass and drums are written for you")
+    with c2:
+        st.selectbox("Lead instrument", list(LEAD_INSTRUMENTS), key=f"{prefix}_lead",
+                     on_change=_sync_sound, args=(f"{prefix}_lead", "mm_lead"),
+                     help="who plays the melody")
 
 
 # --------------------------------------------------------------------------
@@ -301,8 +377,16 @@ def render_control_deck():
         rep_penalty = st.slider("Repeat penalty", 1.0, 2.0, 1.0, 0.05, key="ctl_rep_penalty",
                                 help="penalty on recently used pitches; continuation only; 1.0 = off")
     with c6:
-        tempo = st.slider("Tempo (BPM)", 60, 160, 100, 5, key="bpm")
+        st.session_state.setdefault("bpm", st.session_state.mm_tempo)  # survives leaving the page
+        tempo = st.slider("Tempo (BPM)", 60, 160, step=5, key="bpm")
     st.session_state.mm_tempo = tempo
+    H("<h2 class='sheet-h'>sound</h2>")
+    sound_picker("con", st.session_state.mm_bar)
+    st.toggle("Hear the seed with the band", key="seed_band",
+              help="otherwise the seed plays on the lead instrument alone")
+    if not CAN_RENDER:
+        H("<p class='hint'>Real instruments need a soundfont. Run <b>python -m scripts.get_soundfont</b> "
+          "and reload. Until then the lead plays on the built-in synth.</p>")
     go = st.button("generate", type="primary", key="run_btn")
     st.button("shuffle seed and dials", type="secondary", on_click=_shuffle_dials, key="shuffle_btn")
     H(f"<p class='hint'>checkpoint {escape(CHECKPOINT_PATH)}</p>")
@@ -354,8 +438,11 @@ def studio_view():
           f"{_engine_readout(model, tokenizer, _metre_label())}</div></section>")
         if seed is not None:
             triples = _triples(seed)
+            chords = [(c.start, c.dur, c.name) for c in infer_chords(seed, bar)]
+            heard = band_for(seed, bar, tempo, None if st.session_state.get("seed_band") else "solo")
             H(roll_figure_html(seed, uid="seed-roll", seed_len=10**9, bar=bar, tempo=tempo,
-                               audio_b64=get_audio_b64(triples, tempo)))
+                               stems=heard["stems"] or None, chords=chords,
+                               audio_b64=None if heard["stems"] else get_audio_b64(triples, tempo)))
             lo, hi = min(n.pitch for n in seed), max(n.pitch for n in seed)
             H(f"<p class='note-line'>{len(seed)} notes · {melody_duration(seed)} steps · "
               f"{pitch_name(lo)}–{pitch_name(hi)} · {escape(melody_to_note_string(seed))}</p>")
@@ -382,34 +469,72 @@ def studio_view():
 # --------------------------------------------------------------------------
 # takes
 # --------------------------------------------------------------------------
+def band_panel(bar: int, tempo: int) -> None:
+    """Style, lead instrument and feel for every take on the page."""
+    sty_key = _sound_state(bar)[0]
+    sty = STYLES[sty_key]
+    with st.container(key="band", border=True):
+        H("<h2 class='sheet-h'>band</h2>")
+        c1, c2 = st.columns([2.4, 1], gap="large", vertical_alignment="bottom")
+        with c1:
+            sound_picker("tk", bar)
+        with c2:
+            st.session_state["tk_human"] = st.session_state.mm_human
+            st.toggle("Human feel", key="tk_human", on_change=_sync_sound, args=("tk_human", "mm_human"),
+                      help="phrase-shaped dynamics and slight timing drift, instead of a machine grid")
+        H(f"<p class='hint'>{escape(sty.blurb)} Chords are inferred from each take's own melody. "
+          f"Suggested tempo: {sty.suggested_bpm} BPM (yours is {tempo}).</p>")
+        if tempo != sty.suggested_bpm:
+            st.button(f"use {sty.suggested_bpm} BPM", key="tempo_btn", type="secondary",
+                      on_click=_set_tempo, args=(sty.suggested_bpm,))
+        if not CAN_RENDER:
+            st.warning("No soundfont found, so there are no real instruments yet. Run "
+                       "`python -m scripts.get_soundfont`, then reload. The lead plays on the built-in synth meanwhile.")
+
+
+def _set_tempo(bpm: int) -> None:
+    st.session_state.mm_tempo = bpm
+    st.session_state["bpm"] = bpm
+
+
 def take_card(i, cand, tempo, mm_mode, tokenizer):
     triples = _triples(cand.melody)
+    band = band_for(cand.melody, cand.bar, tempo)
     lo, hi = min(n.pitch for n in cand.melody), max(n.pitch for n in cand.melody)
     score = (f"<div class='take-score'><b>{cand.motif_score:.2f}</b>motif kept</div>"
              if cand.motif_score is not None else "")
+    chord_names = " ".join(name for _, _, name in band["chords"][:8])
     with st.container(key=f"take{i}", border=True):
         H(f"<div class='take-head'><span class='take-n'>{i + 1:02d}</span>"
           f"<div class='take-meta'>{escape(mm_mode)}"
           f"<span>{len(cand.melody)} notes · {melody_duration(cand.melody)} steps · "
-          f"{pitch_name(lo)}–{pitch_name(hi)}</span></div>{score}</div>")
+          f"{pitch_name(lo)}–{pitch_name(hi)}</span>"
+          f"<span>{escape(chord_names)}</span></div>{score}</div>")
         c_art, c_roll = st.columns([1, 2.1], gap="medium")
         with c_art:
             H("<div class='art-frame'>"
               f"{arc_poster_img(cand.melody, seed_len=cand.seed_len_steps, bar=cand.bar, width=600, height=600, center=(0.5, 0.5), radius=0.47)}"
-              "</div>")
+              "</div><div class='cap'>interval contour: each bar is one step up or down</div>"
+              f"{contour_img(cand.melody)}")
         with c_roll:
             H(roll_figure_html(cand.melody, uid=f"take-roll-{i}", seed_len=cand.seed_len_steps,
-                               bar=cand.bar, tempo=tempo, audio_b64=get_audio_b64(triples, tempo))
-              + "<div class='cap'>interval contour: each bar is one step up or down</div>"
-              + contour_img(cand.melody))
-        d1, d2, d3 = st.columns(3, gap="small")
+                               bar=cand.bar, tempo=tempo, stems=band["stems"] or None, chords=band["chords"],
+                               audio_b64=None if band["stems"] else get_audio_b64(triples, tempo)))
+        d1, d2, d3, d4, d5 = st.columns(5, gap="small")
         with d1:
-            st.download_button("save .mid", data=get_cached_midi_bytes(triples, tempo=tempo, bar=cand.bar),
+            st.download_button("melody .mid", data=get_cached_midi_bytes(triples, tempo=tempo, bar=cand.bar),
                                file_name=f"{mm_mode}_{i + 1}.mid", mime="audio/midi", key=f"dl_{i}")
         with d2:
+            st.download_button("band .mid", data=band["midi"], file_name=f"{mm_mode}_{i + 1}_band.mid",
+                               mime="audio/midi", key=f"dlb_{i}")
+        with d3:
+            if band["mp3"]:
+                st.download_button("mixdown .mp3", data=band["mp3"], file_name=f"{mm_mode}_{i + 1}.mp3",
+                                   mime="audio/mpeg", key=f"dlm_{i}")
+        with d4:
             with st.expander("tokens"):
                 H(f"<div class='tokens'>{token_spans(tokenizer, cand.melody, cand.bar)}</div>")
-        with d3:
+        with d5:
             with st.expander("rate this take"):
                 mus = st.slider("Musicality", 1, 5, 3, key=f"mus_{i}")
                 mot = st.slider("Motif lock", 1, 5, 3, key=f"mot_{i}")
@@ -418,8 +543,8 @@ def take_card(i, cand, tempo, mm_mode, tokenizer):
                     log_human_rating("out/ratings.csv", {
                         "checkpoint": CHECKPOINT_PATH, "mode": mm_mode, "take": i + 1,
                         "seed": sig[0], "melody": melody_to_note_string(cand.melody),
-                        "params": repr(sig[1:]), "musicality_1_5": mus,
-                        "motif_preservation_1_5": mot,
+                        "params": repr(sig[1:] + (st.session_state.mm_style, st.session_state.mm_lead)),
+                        "musicality_1_5": mus, "motif_preservation_1_5": mot,
                     })
                     st.toast(f"Take {i + 1} logged: {mus}/5 musicality, {mot}/5 motif.")
 
@@ -440,12 +565,14 @@ def takes_view():
     n = len(candidates)
     page_heading(f"{n} take{'s' if n != 1 else ''}",
                  "The seed changed since these were made. Press generate on the console to refresh them."
-                 if stale else "Press play, click the roll to seek, and open tokens to see what the model wrote.",
+                 if stale else "Press play to hear the band. Mute or solo any instrument, click the roll to seek.",
                  stamp)
     Path("out").mkdir(exist_ok=True)
     mm_mode = st.session_state.mm_mode
-    for i, cand in enumerate(candidates):
-        take_card(i, cand, tempo, mm_mode, tokenizer)
+    band_panel(candidates[0].bar, tempo)
+    with st.spinner("rehearsing the band"):
+        for i, cand in enumerate(candidates):
+            take_card(i, cand, tempo, mm_mode, tokenizer)
 
 
 # --------------------------------------------------------------------------
@@ -489,6 +616,13 @@ def spec_view():
       "tunes, which matches how it is prompted. Sampling is cached, so each new note costs one step.</p>"
       "<p style='margin-top:.8rem'>Sampling runs under a grammar mask: a note can never start before the last one "
       "ends, and every take stops exactly on the target bar.</p></article>"
+      "<article><h2>band</h2>"
+      "<p>The Transformer writes the tune only. Everything under it is written by rules: a chord for every half "
+      "bar, chosen by dynamic programming over the diatonic chords of the estimated key so that chords contain the "
+      "melody's strong-beat notes and move the way pop harmony moves, then voiced with smooth voice-leading. "
+      "A style turns the chords into bass, comping and drums, with phrase-shaped dynamics and slight timing drift.</p>"
+      "<p style='margin-top:.8rem'>Each instrument is rendered through a General MIDI soundfont as its own stem, "
+      "which is what the mixer on every take mutes, solos and balances.</p></article>"
       f"<article><h2>how good</h2>{_eval_table() or '<p>No evaluation summary found. Run melodymorph evaluate.</p>'}"
       "</article></div>")
     rp = Path("out/ratings.csv")
